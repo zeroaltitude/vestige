@@ -15,17 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS ARM64 (Apple Silicon)
+          # macOS ARM64 (Apple Silicon) - Intel macOS dropped, no free runners after macos-13 retirement
           - target: aarch64-apple-darwin
             os: macos-latest
-          # macOS x86_64 (Intel) - macos-13 retired Dec 2025, use macos-15-large
-          - target: x86_64-apple-darwin
-            os: macos-15-large
-          # Linux x86_64
+          # Linux x86_64 - ARM64 Linux dropped (cross-compile OpenSSL issues), users can build from source
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          # Linux ARM64 (uses cross via actions-rust-cross)
-          - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
