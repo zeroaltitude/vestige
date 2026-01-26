@@ -1400,6 +1400,7 @@ cargo build --release --all-features
 
 ## Updating
 
+**Latest version (recommended):**
 ```bash
 cd vestige
 git pull
@@ -1407,7 +1408,27 @@ cargo build --release
 sudo cp target/release/vestige-mcp /usr/local/bin/
 ```
 
+**Pin to a specific version:**
+```bash
+cd vestige
+git fetch --tags
+git checkout v1.1.0  # or any version tag
+cargo build --release
+sudo cp target/release/vestige-mcp /usr/local/bin/
+```
+
+**Available versions:**
+| Version | Highlights |
+|---------|------------|
+| `v1.1.0` | 8 unified tools, CLI binary, comprehensive FAQ |
+| `v1.0.0` | Initial release, 29 tools |
+
 Then restart Claude.
+
+**Check your version:**
+```bash
+vestige-mcp --version
+```
 
 ---
 
