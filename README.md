@@ -1,56 +1,57 @@
-<p align="center">
-<pre>
-██╗   ██╗███████╗███████╗████████╗██╗ ██████╗ ███████╗
-██║   ██║██╔════╝██╔════╝╚══██╔══╝██║██╔════╝ ██╔════╝
-██║   ██║█████╗  ███████╗   ██║   ██║██║  ███╗█████╗
-╚██╗ ██╔╝██╔══╝  ╚════██║   ██║   ██║██║   ██║██╔══╝
- ╚████╔╝ ███████╗███████║   ██║   ██║╚██████╔╝███████╗
-  ╚═══╝  ╚══════╝╚══════╝   ╚═╝   ╚═╝ ╚═════╝ ╚══════╝
-</pre>
-</p>
+# Vestige
 
-<h1 align="center">Vestige</h1>
+**Memory that fades like yours does.**
 
-<p align="center">
-  <strong>Memory traces that fade like yours do</strong>
-</p>
+The only MCP memory server built on cognitive science. FSRS-6 spaced repetition, spreading activation, synaptic tagging—all running 100% local.
 
-<p align="center">
-  The only AI memory system built on real cognitive science.<br/>
-  FSRS-6 spaced repetition. Prediction Error Gating. Context-dependent recall.<br/>
-  29 MCP tools. 100% local. 100% free.
-</p>
-
-<p align="center">
-  <a href="#quick-start-2-minutes">Quick Start</a> |
-  <a href="#all-29-tools">All 29 Tools</a> |
-  <a href="#the-science">The Science</a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/samvallad33/vestige/releases"><img src="https://img.shields.io/github/v/release/samvallad33/vestige?style=flat-square" alt="Release"></a>
-  <a href="https://github.com/samvallad33/vestige/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
-  <a href="https://github.com/samvallad33/vestige/actions"><img src="https://img.shields.io/github/actions/workflow/status/samvallad33/vestige/release.yml?style=flat-square" alt="Build"></a>
-</p>
+[![GitHub stars](https://img.shields.io/github/stars/samvallad33/vestige?style=social)](https://github.com/samvallad33/vestige)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
+[![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green)](https://modelcontextprotocol.io)
 
 ---
 
-## Quick Start (2 minutes)
+## Why Vestige?
 
-### Step 1: Build & Install
+| Problem | How Vestige Solves It |
+|---------|----------------------|
+| AI forgets everything between sessions | Persistent memory with intelligent retrieval |
+| RAG dumps irrelevant context | **Prediction Error Gating** auto-decides CREATE/UPDATE/SUPERSEDE |
+| Memory bloat eats your token budget | **FSRS-6 decay** naturally fades unused memories |
+| No idea what AI "knows" | `recall`, `semantic_search`, `hybrid_search` let you query |
+| Context pollution confuses the model | **29 atomic tools** > 1 overloaded tool with 15 parameters |
+
+---
+
+## Quick Start
+
+### 1. Install
 
 ```bash
 git clone https://github.com/samvallad33/vestige
 cd vestige
 cargo build --release
-sudo cp target/release/vestige-mcp /usr/local/bin/
 ```
 
-That's it. Vestige is now globally available.
+Add to your PATH:
+```bash
+# macOS/Linux
+sudo cp target/release/vestige-mcp /usr/local/bin/
 
-### Step 2: Add to Claude Code
+# Or add to ~/.bashrc / ~/.zshrc
+export PATH="$PATH:/path/to/vestige/target/release"
+```
 
-Add to your `~/.claude/settings.json`:
+### 2. Configure Claude
+
+**Option A: One-liner (Recommended)**
+```bash
+claude mcp add vestige vestige-mcp
+```
+
+**Option B: Manual Config**
+
+<details>
+<summary>Claude Code (~/.claude/settings.json)</summary>
 
 ```json
 {
@@ -61,220 +62,273 @@ Add to your `~/.claude/settings.json`:
   }
 }
 ```
+</details>
 
-### Step 3: Add to Claude Desktop (Optional)
+<details>
+<summary>Claude Desktop (macOS)</summary>
 
-**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "vestige": {
-      "command": "vestige-mcp",
-      "args": [],
-      "env": {
-        "VESTIGE_DATA_DIR": "~/.vestige"
-      }
+      "command": "vestige-mcp"
     }
   }
 }
 ```
+</details>
 
-### Step 4: Restart & Verify
+<details>
+<summary>Claude Desktop (Windows)</summary>
 
-Restart Claude Code/Desktop. You should see 29 Vestige tools available.
+Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "vestige": {
+      "command": "vestige-mcp"
+    }
+  }
+}
+```
+</details>
+
+### 3. Restart Claude
+
+Restart Claude Code or Desktop. You should see **29 Vestige tools** available.
+
+### 4. Test It
+
+Ask Claude:
+> "Remember that I prefer TypeScript over JavaScript"
+
+Then in a new session:
+> "What are my coding preferences?"
+
+It remembers.
 
 ---
 
-## Why Vestige?
+## Important Notes
 
-| Feature | What It Does |
-|---------|--------------|
-| **Prediction Error Gating** | Auto-decides create/update/supersede based on similarity |
-| **FSRS-6 Spaced Repetition** | Full 21-parameter algorithm trained on millions of reviews |
-| **Retroactive Importance** | Mark something important, past 9 hours of memories strengthen |
-| **Context-Dependent Recall** | Retrieval matches encoding context (Tulving 1973) |
-| **Memory States** | Active/Dormant/Silent/Unavailable accessibility model |
-| **100% Local** | No API keys, no cloud, no data leaves your machine |
+### First-Run Network Requirement
+
+Vestige downloads the **Nomic Embed Text v1.5** model (~130MB) from Hugging Face on first use for semantic search.
+
+**All subsequent runs are fully offline.**
+
+Model cache location:
+- macOS/Linux: `~/.cache/huggingface/`
+- Windows: `%USERPROFILE%\.cache\huggingface\`
+
+### Data Storage & Backup
+
+All memories are stored locally in SQLite:
+
+| Platform | Database Location |
+|----------|------------------|
+| macOS | `~/Library/Application Support/com.vestige.core/vestige.db` |
+| Linux | `~/.local/share/vestige/core/vestige.db` |
+| Windows | `%APPDATA%\vestige\core\vestige.db` |
+
+**There is no cloud sync or automatic backup.** Your memories live on your machine.
+
+To back up manually:
+```bash
+# macOS
+cp ~/Library/Application\ Support/com.vestige.core/vestige.db ~/vestige-backup.db
+
+# Linux
+cp ~/.local/share/vestige/core/vestige.db ~/vestige-backup.db
+```
+
+> For most users, losing memories isn't catastrophic—you just start fresh. But if you've built valuable context, periodic backups are recommended.
 
 ---
 
 ## All 29 Tools
 
-### Core Memory (8 tools)
-
+### Core Memory
 | Tool | Description |
 |------|-------------|
-| `ingest` | Store a new memory |
-| `smart_ingest` | **Prediction Error Gating** - auto-decides CREATE/UPDATE/SUPERSEDE based on semantic similarity to existing memories |
-| `recall` | Semantic search with keyword matching |
-| `semantic_search` | Pure embedding-based similarity search |
-| `hybrid_search` | BM25 + semantic + RRF fusion (best retrieval quality) |
-| `get_knowledge` | Retrieve a specific memory by ID |
+| `ingest` | Add new knowledge to memory |
+| `smart_ingest` | **Intelligent ingestion** with Prediction Error Gating—auto-decides CREATE/UPDATE/SUPERSEDE |
+| `recall` | Search by keywords, ranked by retention strength |
+| `semantic_search` | Find conceptually related content via embeddings |
+| `hybrid_search` | Combined keyword + semantic with RRF fusion |
+| `get_knowledge` | Retrieve specific memory by ID |
 | `delete_knowledge` | Remove a memory |
-| `mark_reviewed` | FSRS review with 1-4 rating (strengthens memory) |
+| `mark_reviewed` | FSRS review with rating (1=Again, 2=Hard, 3=Good, 4=Easy) |
 
-### Feedback System (3 tools)
-
+### Feedback System
 | Tool | Description |
 |------|-------------|
-| `promote_memory` | Thumbs up - memory led to good outcome, increase retrieval strength |
-| `demote_memory` | Thumbs down - memory was wrong/unhelpful, decrease retrieval strength |
-| `request_feedback` | Ask user if a memory was helpful after using it |
+| `promote_memory` | Thumbs up—memory led to good outcome |
+| `demote_memory` | Thumbs down—memory was wrong or unhelpful |
+| `request_feedback` | Ask user if a memory was helpful |
 
-### Stats & Maintenance (3 tools)
-
+### Stats & Maintenance
 | Tool | Description |
 |------|-------------|
-| `get_stats` | Memory system statistics (total nodes, retention, embeddings) |
+| `get_stats` | Memory system statistics |
 | `health_check` | System health status |
-| `run_consolidation` | Trigger memory consolidation cycle (decay, promote, embed) |
+| `run_consolidation` | Trigger decay cycle, generate embeddings |
 
-### Codebase Memory (3 tools)
-
+### Codebase Memory
 | Tool | Description |
 |------|-------------|
-| `remember_pattern` | Store a code pattern or convention |
-| `remember_decision` | Store an architectural decision with rationale |
-| `get_codebase_context` | Retrieve patterns and decisions for current project |
+| `remember_pattern` | Save code patterns/conventions |
+| `remember_decision` | Save architectural decisions with rationale |
+| `get_codebase_context` | Retrieve patterns/decisions for current project |
 
-### Prospective Memory (5 tools)
-
+### Prospective Memory (Intentions)
 | Tool | Description |
 |------|-------------|
-| `set_intention` | Remember to do something in the future (time/context/event triggers) |
-| `check_intentions` | Check if any intentions should trigger based on current context |
-| `complete_intention` | Mark an intention as fulfilled |
+| `set_intention` | "Remind me to X when Y" |
+| `check_intentions` | Check triggered intentions for current context |
+| `complete_intention` | Mark intention as fulfilled |
 | `snooze_intention` | Delay an intention |
-| `list_intentions` | List all active intentions |
+| `list_intentions` | View all intentions |
 
-### Neuroscience (7 tools)
-
+### Neuroscience Layer
 | Tool | Description |
 |------|-------------|
-| `get_memory_state` | Check cognitive state (Active/Dormant/Silent/Unavailable) |
-| `list_by_state` | List memories filtered by cognitive state |
-| `state_stats` | Distribution of memories across states |
+| `get_memory_state` | Check if memory is Active/Dormant/Silent/Unavailable |
+| `list_by_state` | List memories grouped by cognitive state |
+| `state_stats` | Distribution of memory states |
 | `trigger_importance` | Retroactively strengthen recent memories (Synaptic Tagging) |
-| `find_tagged` | Find memories with high retention (tagged/strengthened) |
+| `find_tagged` | Find high-retention memories |
 | `tagging_stats` | Synaptic tagging statistics |
-| `match_context` | Context-dependent retrieval (Tulving's Encoding Specificity) |
+| `match_context` | Context-dependent retrieval (Encoding Specificity) |
 
 ---
 
-## Prediction Error Gating
+## How It Works
 
-The `smart_ingest` tool implements neuroscience-inspired memory gating:
+### Prediction Error Gating
+
+When you call `smart_ingest`, Vestige compares new content against existing memories:
+
+| Similarity | Action | Why |
+|------------|--------|-----|
+| > 0.92 | **REINFORCE** existing | Almost identical—just strengthen |
+| > 0.75 | **UPDATE** existing | Related—merge the information |
+| < 0.75 | **CREATE** new | Novel—add as new memory |
+
+This prevents duplicate memories and keeps your knowledge base clean.
+
+### FSRS-6 Spaced Repetition
+
+Memories decay over time following the **Ebbinghaus forgetting curve**:
 
 ```
-New memory: "The API uses JWT tokens"
-                    ↓
-         [Prediction Error Gate]
-                    ↓
-┌────────────────────────────────────────────┐
-│ Found similar: "API uses OAuth"            │
-│ Similarity: 0.82 | Prediction Error: 0.18  │
-│                                            │
-│ Decision: UPDATE existing memory           │
-│ (Not creating duplicate)                   │
-└────────────────────────────────────────────┘
+Retention = e^(-time/stability)
 ```
 
-**Thresholds:**
-- `>0.92` similarity → **Reinforce** (near-identical, just strengthen)
-- `>0.75` similarity → **Update/Merge** (related, combine information)
-- `<0.75` similarity → **Create** (sufficiently different, new memory)
-- Demoted memory + similar new → **Supersede** (replace bad with good)
+- Memories you access stay strong
+- Memories you ignore fade naturally
+- No manual cleanup required
 
-This solves the "bad vs good similar memory" problem automatically.
+FSRS-6 uses 21 parameters optimized on millions of Anki reviews—30% more efficient than SM-2.
+
+### Memory States
+
+Based on accessibility, memories exist in four states:
+
+| State | Description |
+|-------|-------------|
+| **Active** | High retention, immediately retrievable |
+| **Dormant** | Medium retention, retrievable with effort |
+| **Silent** | Low retention, rarely surfaces |
+| **Unavailable** | Below threshold, effectively forgotten |
 
 ---
 
 ## The Science
 
-### FSRS-6 Algorithm (2024)
+Vestige implements concepts from memory research:
 
-Free Spaced Repetition Scheduler version 6. Trained on 700M+ reviews:
+| Feature | Inspired By | Reference |
+|---------|-------------|-----------|
+| Spaced repetition | FSRS-6 algorithm | [Piotr Wozniak, 2022](https://github.com/open-spaced-repetition/fsrs4anki) |
+| Storage vs Retrieval strength | Bjork's New Theory of Disuse | [Bjork & Bjork, 1992](https://psycnet.apa.org/record/1992-97586-004) |
+| Retroactive importance | Synaptic Tagging & Capture | [Frey & Morris, 1997](https://www.nature.com/articles/385533a0) |
+| Context-dependent retrieval | Encoding Specificity Principle | [Tulving & Thomson, 1973](https://psycnet.apa.org/record/1973-31800-001) |
+| Forgetting curve | Ebbinghaus decay function | [Ebbinghaus, 1885](https://en.wikipedia.org/wiki/Forgetting_curve) |
 
-```rust
-const FSRS_WEIGHTS: [f64; 21] = [
-    0.40255, 1.18385, 3.173, 15.69105, 7.1949,
-    0.5345, 1.4604, 0.0046, 1.54575, 0.1192,
-    1.01925, 1.9395, 0.11, 0.29605, 2.2698,
-    0.2315, 2.9898, 0.51655, 0.6621, 0.1, 0.5
-];
-```
-
-20-30% better retention than SM-2 (what Anki uses).
-
-### Bjork & Bjork Dual-Strength Model (1992)
-
-Memories have two independent strengths:
-
-- **Storage Strength**: How well encoded (never decreases)
-- **Retrieval Strength**: How accessible now (decays with time)
-
-Key insight: difficult retrievals increase storage strength more than easy ones.
-
-### Synaptic Tagging & Capture (Frey & Morris 1997)
-
-When something important happens, it retroactively strengthens memories from the past several hours. Vestige implements this with a 9-hour capture window.
-
-### Encoding Specificity Principle (Tulving 1973)
-
-Memory retrieval is most effective when the retrieval context matches the encoding context. The `match_context` tool scores memories by context similarity.
-
-### Ebbinghaus Forgetting Curve (1885)
-
-Memory retention decays exponentially: `R = e^(-t/S)`
-
-Where R = retrievability, t = time, S = stability.
+> **Note**: These are *simplified models inspired by* cognitive science research, designed to be practical for AI memory management. They are not literal implementations of neural biochemistry.
 
 ---
 
 ## Configuration
 
-### Environment Variables
+Environment variables:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VESTIGE_DATA_DIR` | Data storage directory | `~/.vestige` |
-| `VESTIGE_LOG_LEVEL` | Log verbosity (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VESTIGE_DATA_DIR` | Platform default | Custom database location |
+| `VESTIGE_LOG_LEVEL` | `info` | Logging verbosity |
+| `RUST_LOG` | - | Detailed tracing output |
 
-### Data Location
+Command-line options:
+```bash
+vestige-mcp --data-dir /custom/path
+vestige-mcp --help
+```
 
-All data is stored in `~/.vestige/` by default:
-- `vestige.db` - SQLite database with FTS5
-- `embeddings/` - Local embedding cache
+---
+
+## Troubleshooting
+
+### "Command not found" after installation
+
+Make sure `vestige-mcp` is in your PATH:
+```bash
+which vestige-mcp
+# Should output: /usr/local/bin/vestige-mcp
+```
+
+If not found:
+```bash
+# Use full path in Claude config
+claude mcp add vestige /full/path/to/vestige-mcp
+```
+
+### Model download fails
+
+First run requires internet to download the embedding model. If behind a proxy:
+```bash
+export HTTPS_PROXY=your-proxy:port
+```
+
+### "Tools not showing" in Claude
+
+1. Check config file syntax (valid JSON)
+2. Restart Claude completely (not just reload)
+3. Check logs: `tail -f ~/.claude/logs/mcp.log`
+
+### Database locked errors
+
+Vestige uses SQLite with WAL mode. If you see lock errors:
+```bash
+# Only one instance should run at a time
+pkill vestige-mcp
+```
 
 ---
 
 ## Development
 
-### Prerequisites
-
-- Rust 1.75+
-
-### Building
-
 ```bash
-git clone https://github.com/samvallad33/vestige
-cd vestige
-cargo build --release
-```
+# Run tests
+cargo test --all-features
 
-### Testing
+# Run with logging
+RUST_LOG=debug cargo run --release
 
-```bash
-cargo test --workspace
-```
-
-### Installing Locally
-
-```bash
-sudo cp target/release/vestige-mcp /usr/local/bin/
+# Build optimized binary
+cargo build --release --all-features
 ```
 
 ---
@@ -288,43 +342,22 @@ cargo build --release
 sudo cp target/release/vestige-mcp /usr/local/bin/
 ```
 
-Restart Claude Code/Desktop to pick up changes.
-
----
-
-## Troubleshooting
-
-### "vestige-mcp: command not found"
-
-Make sure you copied the binary:
-```bash
-sudo cp target/release/vestige-mcp /usr/local/bin/
-```
-
-### "No tools showing in Claude"
-
-1. Check your config file syntax (valid JSON)
-2. Restart Claude Code/Desktop completely
-3. Check logs: `VESTIGE_LOG_LEVEL=debug vestige-mcp`
-
-### "Embeddings not generating"
-
-First run downloads the embedding model (~100MB). Check your internet connection and wait for download to complete.
-
----
-
-## Contributing
-
-Contributions welcome! Please open an issue or submit a pull request.
+Then restart Claude.
 
 ---
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0 (dual-licensed)
+
+---
+
+## Contributing
+
+Issues and PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 <p align="center">
-  <sub>Built with cognitive science and Rust.</sub>
+  <i>Built by <a href="https://github.com/samvallad33">@samvallad33</a></i>
 </p>
