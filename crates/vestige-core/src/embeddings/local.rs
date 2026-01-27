@@ -186,7 +186,18 @@ impl EmbeddingService {
 
     /// Check if the model is ready
     pub fn is_ready(&self) -> bool {
-        get_model().is_ok()
+        match get_model() {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("Embedding model not ready: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Check if the model is ready and return the error if not
+    pub fn check_ready(&self) -> Result<(), EmbeddingError> {
+        get_model().map(|_| ())
     }
 
     /// Initialize the model (downloads if necessary)

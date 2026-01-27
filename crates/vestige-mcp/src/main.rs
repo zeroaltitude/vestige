@@ -133,8 +133,21 @@ async fn main() {
 
     // Initialize storage with optional custom data directory
     let storage = match Storage::new(data_dir) {
-        Ok(s) => {
+        Ok(mut s) => {
             info!("Storage initialized successfully");
+
+            // Try to initialize embeddings early and log any issues
+            #[cfg(feature = "embeddings")]
+            {
+                if let Err(e) = s.init_embeddings() {
+                    error!("Failed to initialize embedding service: {}", e);
+                    error!("Smart ingest will fall back to regular ingest without deduplication");
+                    error!("Hint: Check FASTEMBED_CACHE_PATH or ensure ~/.fastembed_cache exists");
+                } else {
+                    info!("Embedding service initialized successfully");
+                }
+            }
+
             Arc::new(Mutex::new(s))
         }
         Err(e) => {

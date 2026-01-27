@@ -1072,6 +1072,20 @@ impl Storage {
         false
     }
 
+    /// Initialize the embedding service explicitly
+    /// Call this at startup to catch initialization errors early
+    #[cfg(feature = "embeddings")]
+    pub fn init_embeddings(&mut self) -> Result<()> {
+        self.embedding_service.init().map_err(|e| {
+            StorageError::Init(format!("Embedding service initialization failed: {}", e))
+        })
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    pub fn init_embeddings(&mut self) -> Result<()> {
+        Ok(()) // No-op when embeddings feature is disabled
+    }
+
     /// Get query embedding from cache or compute it
     #[cfg(feature = "embeddings")]
     fn get_query_embedding(&self, query: &str) -> Result<Vec<f32>> {
