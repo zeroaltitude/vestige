@@ -5,7 +5,44 @@ All notable changes to Vestige will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.1] - 2025-01-27
+
+### Fixed
+- UTF-8 string slicing issues in keyword search and prospective memory
+- Silent error handling in MCP stdio protocol
+- Feature flag forwarding between crates
+- All GitHub issues resolved (#1, #3, #4)
+
+### Added
+- Pre-built binaries for Linux, Windows, and macOS (Intel & ARM)
+- GitHub Actions CI/CD for automated releases
+
+---
+
+## [1.1.0] - 2025-01-26
+
+### Changed
+- **Tool Consolidation**: 29 tools → 8 cognitive primitives
+  - `recall`, `semantic_search`, `hybrid_search` → `search`
+  - `get_knowledge`, `delete_knowledge`, `get_memory_state` → `memory`
+  - `remember_pattern`, `remember_decision`, `get_codebase_context` → `codebase`
+  - 5 intention tools → `intention`
+- Stats and maintenance moved from MCP to CLI (`vestige stats`, `vestige health`, etc.)
+
+### Added
+- CLI admin commands: `vestige stats`, `vestige health`, `vestige consolidate`, `vestige restore`
+- Feedback tools: `promote_memory`, `demote_memory`
+- 30+ FAQ entries with verified neuroscience claims
+- Storage modes documentation: Global, per-project, multi-Claude household
+- CLAUDE.md templates for proactive memory use
+- Version pinning via git tags
+
+### Deprecated
+- Old tool names (still work with warnings, removed in v2.0)
+
+---
+
+## [1.0.0] - 2025-01-25
 
 ### Added
 - FSRS-6 spaced repetition algorithm with 21 parameters
