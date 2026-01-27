@@ -115,9 +115,11 @@ impl McpServer {
 
     /// Handle tools/list request
     async fn handle_tools_list(&self) -> Result<serde_json::Value, JsonRpcError> {
+        // v1.1: Only expose 8 core tools. Deprecated tools still work internally
+        // for backward compatibility but are not listed.
         let tools = vec![
             // ================================================================
-            // UNIFIED TOOLS (v1.1+) - Preferred API
+            // UNIFIED TOOLS (v1.1+)
             // ================================================================
             ToolDescription {
                 name: "search".to_string(),
@@ -152,117 +154,9 @@ impl McpServer {
                 description: Some("INTELLIGENT memory ingestion with Prediction Error Gating. Automatically decides whether to CREATE new, UPDATE existing, or SUPERSEDE outdated memories based on semantic similarity. Solves the 'bad vs good similar memory' problem.".to_string()),
                 input_schema: tools::smart_ingest::schema(),
             },
-            ToolDescription {
-                name: "recall".to_string(),
-                description: Some("(deprecated) Use 'search' instead. Search and retrieve knowledge from memory.".to_string()),
-                input_schema: tools::recall::schema(),
-            },
-            ToolDescription {
-                name: "semantic_search".to_string(),
-                description: Some("(deprecated) Use 'search' instead. Search memories using semantic similarity.".to_string()),
-                input_schema: tools::search::semantic_schema(),
-            },
-            ToolDescription {
-                name: "hybrid_search".to_string(),
-                description: Some("(deprecated) Use 'search' instead. Combined keyword + semantic search with RRF fusion.".to_string()),
-                input_schema: tools::search::hybrid_schema(),
-            },
-            ToolDescription {
-                name: "get_knowledge".to_string(),
-                description: Some("(deprecated) Use 'memory' with action='get' instead. Retrieve a specific memory by ID.".to_string()),
-                input_schema: tools::knowledge::get_schema(),
-            },
-            ToolDescription {
-                name: "delete_knowledge".to_string(),
-                description: Some("(deprecated) Use 'memory' with action='delete' instead. Delete a memory by ID.".to_string()),
-                input_schema: tools::knowledge::delete_schema(),
-            },
-            ToolDescription {
-                name: "mark_reviewed".to_string(),
-                description: Some("Mark a memory as reviewed with FSRS rating (1=Again, 2=Hard, 3=Good, 4=Easy). Strengthens retention.".to_string()),
-                input_schema: tools::review::schema(),
-            },
-            // NOTE: Stats/maintenance tools (get_stats, health_check, run_consolidation)
-            // moved to CLI-only in v1.1. Use: vestige stats, vestige health, vestige consolidate
-            // Codebase tools (deprecated - use unified 'codebase' tool)
-            ToolDescription {
-                name: "remember_pattern".to_string(),
-                description: Some("(deprecated) Use 'codebase' with action='remember_pattern' instead. Remember a code pattern or convention.".to_string()),
-                input_schema: tools::codebase::pattern_schema(),
-            },
-            ToolDescription {
-                name: "remember_decision".to_string(),
-                description: Some("(deprecated) Use 'codebase' with action='remember_decision' instead. Remember an architectural decision.".to_string()),
-                input_schema: tools::codebase::decision_schema(),
-            },
-            ToolDescription {
-                name: "get_codebase_context".to_string(),
-                description: Some("(deprecated) Use 'codebase' with action='get_context' instead. Get remembered patterns and decisions.".to_string()),
-                input_schema: tools::codebase::context_schema(),
-            },
-            // Prospective memory (intentions) - deprecated, use unified 'intention' tool
-            ToolDescription {
-                name: "set_intention".to_string(),
-                description: Some("(deprecated) Use 'intention' with action='set' instead. Remember to do something in the future.".to_string()),
-                input_schema: tools::intentions::set_schema(),
-            },
-            ToolDescription {
-                name: "check_intentions".to_string(),
-                description: Some("(deprecated) Use 'intention' with action='check' instead. Check if any intentions should be triggered.".to_string()),
-                input_schema: tools::intentions::check_schema(),
-            },
-            ToolDescription {
-                name: "complete_intention".to_string(),
-                description: Some("(deprecated) Use 'intention' with action='update', status='complete' instead. Mark an intention as complete.".to_string()),
-                input_schema: tools::intentions::complete_schema(),
-            },
-            ToolDescription {
-                name: "snooze_intention".to_string(),
-                description: Some("(deprecated) Use 'intention' with action='update', status='snooze' instead. Snooze an intention.".to_string()),
-                input_schema: tools::intentions::snooze_schema(),
-            },
-            ToolDescription {
-                name: "list_intentions".to_string(),
-                description: Some("(deprecated) Use 'intention' with action='list' instead. List all intentions.".to_string()),
-                input_schema: tools::intentions::list_schema(),
-            },
-            // Neuroscience tools
-            ToolDescription {
-                name: "get_memory_state".to_string(),
-                description: Some("(deprecated) Use 'memory' with action='state' instead. Get the cognitive state of a memory.".to_string()),
-                input_schema: tools::memory_states::get_schema(),
-            },
-            ToolDescription {
-                name: "list_by_state".to_string(),
-                description: Some("List memories grouped by cognitive state.".to_string()),
-                input_schema: tools::memory_states::list_schema(),
-            },
-            ToolDescription {
-                name: "state_stats".to_string(),
-                description: Some("Get statistics about memory state distribution.".to_string()),
-                input_schema: tools::memory_states::stats_schema(),
-            },
-            ToolDescription {
-                name: "trigger_importance".to_string(),
-                description: Some("Trigger retroactive importance to strengthen recent memories. Based on Synaptic Tagging & Capture (Frey & Morris 1997).".to_string()),
-                input_schema: tools::tagging::trigger_schema(),
-            },
-            ToolDescription {
-                name: "find_tagged".to_string(),
-                description: Some("Find memories with high retention (tagged/strengthened memories).".to_string()),
-                input_schema: tools::tagging::find_schema(),
-            },
-            ToolDescription {
-                name: "tagging_stats".to_string(),
-                description: Some("Get synaptic tagging and retention statistics.".to_string()),
-                input_schema: tools::tagging::stats_schema(),
-            },
-            ToolDescription {
-                name: "match_context".to_string(),
-                description: Some("Search memories with context-dependent retrieval. Based on Tulving's Encoding Specificity Principle (1973).".to_string()),
-                input_schema: tools::context::schema(),
-            },
-            // Feedback / preference learning
+            // ================================================================
+            // Feedback tools
+            // ================================================================
             ToolDescription {
                 name: "promote_memory".to_string(),
                 description: Some("Promote a memory (thumbs up). Use when a memory led to a good outcome. Increases retrieval strength so it surfaces more often.".to_string()),
@@ -272,11 +166,6 @@ impl McpServer {
                 name: "demote_memory".to_string(),
                 description: Some("Demote a memory (thumbs down). Use when a memory led to a bad outcome or was wrong. Decreases retrieval strength so better alternatives surface. Does NOT delete.".to_string()),
                 input_schema: tools::feedback::demote_schema(),
-            },
-            ToolDescription {
-                name: "request_feedback".to_string(),
-                description: Some("Ask the user if a memory was helpful. Use after applying advice from a memory. Returns options for the user to choose: helpful (promote), wrong (demote), or skip.".to_string()),
-                input_schema: tools::feedback::request_feedback_schema(),
             },
         ];
 
@@ -809,13 +698,15 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // Verify expected tools are present
+        // v1.1+: Only 8 tools are exposed (deprecated tools work internally but aren't listed)
+        assert_eq!(tools.len(), 8, "Expected exactly 8 tools in v1.1+");
+
         let tool_names: Vec<&str> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
 
-        // Unified tools (v1.1+)
+        // Unified tools
         assert!(tool_names.contains(&"search"));
         assert!(tool_names.contains(&"memory"));
         assert!(tool_names.contains(&"codebase"));
@@ -823,18 +714,11 @@ mod tests {
 
         // Core tools
         assert!(tool_names.contains(&"ingest"));
-        assert!(tool_names.contains(&"recall"));
-        assert!(tool_names.contains(&"semantic_search"));
-        assert!(tool_names.contains(&"hybrid_search"));
-        assert!(tool_names.contains(&"get_knowledge"));
-        assert!(tool_names.contains(&"delete_knowledge"));
-        assert!(tool_names.contains(&"mark_reviewed"));
-        // NOTE: get_stats, health_check, run_consolidation moved to CLI in v1.1
-        assert!(tool_names.contains(&"set_intention"));
-        assert!(tool_names.contains(&"check_intentions"));
-        assert!(tool_names.contains(&"complete_intention"));
-        assert!(tool_names.contains(&"snooze_intention"));
-        assert!(tool_names.contains(&"list_intentions"));
+        assert!(tool_names.contains(&"smart_ingest"));
+
+        // Feedback tools
+        assert!(tool_names.contains(&"promote_memory"));
+        assert!(tool_names.contains(&"demote_memory"));
     }
 
     #[tokio::test]
