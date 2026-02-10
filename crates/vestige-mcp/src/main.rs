@@ -45,12 +45,28 @@ use vestige_core::Storage;
 use crate::protocol::stdio::StdioTransport;
 use crate::server::McpServer;
 
-/// Parse command-line arguments and return the optional data directory path.
-/// Returns `None` for the path if no `--data-dir` was specified.
+/// Parsed CLI arguments
+struct CliArgs {
+    data_dir: Option<PathBuf>,
+    #[cfg(feature = "http")]
+    http: bool,
+    #[cfg(feature = "http")]
+    host: String,
+    #[cfg(feature = "http")]
+    port: u16,
+}
+
+/// Parse command-line arguments.
 /// Exits the process if `--help` or `--version` is requested.
-fn parse_args() -> Option<PathBuf> {
+fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let mut data_dir: Option<PathBuf> = None;
+    #[cfg(feature = "http")]
+    let mut http = false;
+    #[cfg(feature = "http")]
+    let mut host = "127.0.0.1".to_string();
+    #[cfg(feature = "http")]
+    let mut port: u16 = 3100;
     let mut i = 1;
 
     while i < args.len() {
@@ -67,6 +83,12 @@ fn parse_args() -> Option<PathBuf> {
                 println!("    -h, --help              Print help information");
                 println!("    -V, --version           Print version information");
                 println!("    --data-dir <PATH>       Custom data directory");
+                #[cfg(feature = "http")]
+                {
+                    println!("    --http                  Enable HTTP transport (default: stdio)");
+                    println!("    --host <HOST>           HTTP bind address (default: 127.0.0.1)");
+                    println!("    --port <PORT>           HTTP port (default: 3100)");
+                }
                 println!();
                 println!("ENVIRONMENT:");
                 println!("    RUST_LOG               Log level filter (e.g., debug, info, warn, error)");
@@ -74,6 +96,8 @@ fn parse_args() -> Option<PathBuf> {
                 println!("EXAMPLES:");
                 println!("    vestige-mcp");
                 println!("    vestige-mcp --data-dir /custom/path");
+                #[cfg(feature = "http")]
+                println!("    vestige-mcp --http --port 8080");
                 println!("    RUST_LOG=debug vestige-mcp");
                 std::process::exit(0);
             }
@@ -91,7 +115,6 @@ fn parse_args() -> Option<PathBuf> {
                 data_dir = Some(PathBuf::from(&args[i]));
             }
             arg if arg.starts_with("--data-dir=") => {
-                // Safe: we just verified the prefix exists with starts_with
                 let path = arg.strip_prefix("--data-dir=").unwrap_or("");
                 if path.is_empty() {
                     eprintln!("error: --data-dir requires a path argument");
@@ -99,6 +122,42 @@ fn parse_args() -> Option<PathBuf> {
                     std::process::exit(1);
                 }
                 data_dir = Some(PathBuf::from(path));
+            }
+            #[cfg(feature = "http")]
+            "--http" => {
+                http = true;
+            }
+            #[cfg(feature = "http")]
+            "--host" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --host requires an address argument");
+                    std::process::exit(1);
+                }
+                host = args[i].clone();
+            }
+            #[cfg(feature = "http")]
+            arg if arg.starts_with("--host=") => {
+                host = arg.strip_prefix("--host=").unwrap_or("127.0.0.1").to_string();
+            }
+            #[cfg(feature = "http")]
+            "--port" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --port requires a number argument");
+                    std::process::exit(1);
+                }
+                port = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("error: --port must be a valid port number");
+                    std::process::exit(1);
+                });
+            }
+            #[cfg(feature = "http")]
+            arg if arg.starts_with("--port=") => {
+                port = arg.strip_prefix("--port=").unwrap_or("3100").parse().unwrap_or_else(|_| {
+                    eprintln!("error: --port must be a valid port number");
+                    std::process::exit(1);
+                });
             }
             arg => {
                 eprintln!("error: unknown argument '{}'", arg);
@@ -110,13 +169,21 @@ fn parse_args() -> Option<PathBuf> {
         i += 1;
     }
 
-    data_dir
+    CliArgs {
+        data_dir,
+        #[cfg(feature = "http")]
+        http,
+        #[cfg(feature = "http")]
+        host,
+        #[cfg(feature = "http")]
+        port,
+    }
 }
 
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments first (before logging init, so --help/--version work cleanly)
-    let data_dir = parse_args();
+    let cli = parse_args();
 
     // Initialize logging to stderr (stdout is for JSON-RPC)
     tracing_subscriber::fmt()
@@ -132,7 +199,7 @@ async fn main() {
     info!("Vestige MCP Server v{} starting...", env!("CARGO_PKG_VERSION"));
 
     // Initialize storage with optional custom data directory
-    let storage = match Storage::new(data_dir) {
+    let storage = match Storage::new(cli.data_dir) {
         Ok(mut s) => {
             info!("Storage initialized successfully");
 
@@ -156,15 +223,32 @@ async fn main() {
         }
     };
 
-    // Create MCP server
-    let server = McpServer::new(storage);
+    // Select transport based on CLI flags
+    #[cfg(feature = "http")]
+    if cli.http {
+        use crate::protocol::http::{HttpTransport, HttpTransportConfig};
 
-    // Create stdio transport
+        let config = HttpTransportConfig {
+            host: cli.host,
+            port: cli.port,
+        };
+        let transport = HttpTransport::new(config);
+
+        if let Err(e) = transport.run(storage).await {
+            error!("HTTP server error: {}", e);
+            std::process::exit(1);
+        }
+
+        info!("Vestige MCP Server shutting down");
+        return;
+    }
+
+    // Default: stdio transport
+    let server = McpServer::new(storage);
     let transport = StdioTransport::new();
 
     info!("Starting MCP server on stdio...");
 
-    // Run the server
     if let Err(e) = transport.run(server).await {
         error!("Server error: {}", e);
         std::process::exit(1);

@@ -10,9 +10,10 @@ categories = ["command-line-utilities", "database"]
 repository = "https://github.com/samvallad33/vestige"
 
 [features]
-default = ["embeddings", "vector-search"]
+default = ["embeddings", "vector-search", "http"]
 embeddings = ["vestige-core/embeddings"]
 vector-search = ["vestige-core/vector-search"]
+http = ["dep:axum", "dep:futures"]
 
 [[bin]]
 name = "vestige-mcp"
@@ -63,6 +64,10 @@ directories = "6"
 
 # Official Anthropic MCP Rust SDK
 rmcp = "0.14"
+
+# HTTP transport (optional, behind "http" feature)
+axum = { version = "0.8", optional = true }
+futures = { version = "0.3", optional = true }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
