@@ -25,7 +25,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use vestige_core::Storage;
 
-use super::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION};
+use super::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::cognitive::CognitiveEngine;
 use crate::server::McpServer;
 
 /// Per-session state
@@ -38,7 +39,9 @@ struct AppState {
     /// Session store: session_id → Session
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Shared storage backend (cloned into each McpServer)
-    storage: Arc<Mutex<Storage>>,
+    storage: Arc<Storage>,
+    /// Shared cognitive engine
+    cognitive: Arc<Mutex<CognitiveEngine>>,
 }
 
 /// Configuration for the HTTP transport
@@ -67,10 +70,11 @@ impl HttpTransport {
     }
 
     /// Run the HTTP MCP server
-    pub async fn run(self, storage: Arc<Mutex<Storage>>) -> Result<(), std::io::Error> {
+    pub async fn run(self, storage: Arc<Storage>, cognitive: Arc<Mutex<CognitiveEngine>>) -> Result<(), std::io::Error> {
         let state = Arc::new(AppState {
             sessions: Mutex::new(HashMap::new()),
             storage,
+            cognitive,
         });
 
         let app = Router::new()
@@ -115,7 +119,7 @@ async fn get_or_create_session(
 
     // Create new session
     let session_id = Uuid::new_v4().to_string();
-    let server = McpServer::new(state.storage.clone());
+    let server = McpServer::new(state.storage.clone(), state.cognitive.clone());
     let session = Arc::new(Session {
         server: Mutex::new(server),
     });

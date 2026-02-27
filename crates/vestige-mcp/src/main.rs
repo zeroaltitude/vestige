@@ -235,7 +235,9 @@ async fn main() {
             port: cli.port,
         };
         let transport = HttpTransport::new(config);
-        if let Err(e) = transport.run(storage).await {
+        let cognitive = Arc::new(Mutex::new(cognitive::CognitiveEngine::new()));
+        info!("CognitiveEngine initialized for HTTP transport");
+        if let Err(e) = transport.run(storage, cognitive).await {
             error!("HTTP server error: {}", e);
             std::process::exit(1);
         }
