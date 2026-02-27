@@ -202,7 +202,7 @@ async fn main() {
 
     // Initialize storage with optional custom data directory
     let storage = match Storage::new(cli.data_dir) {
-        Ok(mut s) => {
+        Ok(s) => {
             info!("Storage initialized successfully");
 
             // Try to initialize embeddings early and log any issues
