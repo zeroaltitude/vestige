@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Search Tools (Deprecated - use search_unified instead)
 //!
 //! Semantic and hybrid search implementations.
@@ -6,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::Storage;
 
@@ -91,7 +89,7 @@ struct HybridSearchArgs {
 }
 
 pub async fn execute_semantic(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: SemanticSearchArgs = match args {
@@ -103,7 +101,6 @@ pub async fn execute_semantic(
         return Err("Query cannot be empty".to_string());
     }
 
-    let storage = storage.lock().await;
 
     // Check if embeddings are ready
     if !storage.is_embedding_ready() {
@@ -144,7 +141,7 @@ pub async fn execute_semantic(
 }
 
 pub async fn execute_hybrid(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: HybridSearchArgs = match args {
@@ -156,14 +153,13 @@ pub async fn execute_hybrid(
         return Err("Query cannot be empty".to_string());
     }
 
-    let storage = storage.lock().await;
 
     let results = storage
         .hybrid_search(
             &args.query,
             args.limit.unwrap_or(10).clamp(1, 50),
-            args.keyword_weight.unwrap_or(0.5).clamp(0.0, 1.0),
-            args.semantic_weight.unwrap_or(0.5).clamp(0.0, 1.0),
+            args.keyword_weight.unwrap_or(0.3).clamp(0.0, 1.0),
+            args.semantic_weight.unwrap_or(0.7).clamp(0.0, 1.0),
         )
         .map_err(|e| e.to_string())?;
 

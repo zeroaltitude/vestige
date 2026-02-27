@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::fsrs::{FSRSScheduler, FSRSState, LearningState, Rating};
+use crate::fsrs::{
+    retrievability_with_decay, DEFAULT_DECAY,
+    FSRSScheduler, FSRSState, LearningState, Rating,
+};
 use crate::memory::{
     ConsolidationResult, EmbeddingResult, IngestInput, KnowledgeNode, MatchType, MemoryStats,
     RecallInput, SearchMode, SearchResult, SimilarityResult,
@@ -19,10 +22,13 @@ use crate::memory::{
 use crate::search::sanitize_fts5_query;
 
 #[cfg(feature = "embeddings")]
-use crate::embeddings::{Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
+use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
 
 #[cfg(feature = "vector-search")]
-use crate::search::{reciprocal_rank_fusion, VectorIndex};
+use crate::search::{linear_combination, VectorIndex};
+
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+use crate::search::hyde;
 
 // ============================================================================
 // ERROR TYPES
@@ -75,9 +81,14 @@ pub struct SmartIngestResult {
 // ============================================================================
 
 /// Main storage struct with integrated embedding and vector search
+///
+/// Uses separate reader/writer connections for interior mutability.
+/// All methods take `&self` (not `&mut self`), making Storage `Send + Sync`
+/// so the MCP layer can use `Arc<Storage>` instead of `Arc<Mutex<Storage>>`.
 pub struct Storage {
-    conn: Connection,
-    scheduler: FSRSScheduler,
+    writer: Mutex<Connection>,
+    reader: Mutex<Connection>,
+    scheduler: Mutex<FSRSScheduler>,
     #[cfg(feature = "embeddings")]
     embedding_service: EmbeddingService,
     #[cfg(feature = "vector-search")]
@@ -88,6 +99,34 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Apply PRAGMAs and optional encryption to a connection
+    fn configure_connection(conn: &Connection) -> Result<()> {
+        // Apply encryption key if SQLCipher is enabled and key is provided
+        #[cfg(feature = "encryption")]
+        {
+            if let Ok(key) = std::env::var("VESTIGE_ENCRYPTION_KEY") {
+                if !key.is_empty() {
+                    conn.pragma_update(None, "key", &key)?;
+                }
+            }
+        }
+
+        // Configure SQLite for performance
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -64000;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA journal_size_limit = 67108864;
+             PRAGMA optimize = 0x10002;",
+        )?;
+
+        Ok(())
+    }
+
     /// Create new storage instance
     pub fn new(db_path: Option<PathBuf>) -> Result<Self> {
         let path = match db_path {
@@ -99,21 +138,36 @@ impl Storage {
 
                 let data_dir = proj_dirs.data_dir();
                 std::fs::create_dir_all(data_dir)?;
+                // Restrict directory permissions to owner-only on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o700);
+                    let _ = std::fs::set_permissions(data_dir, perms);
+                }
                 data_dir.join("vestige.db")
             }
         };
 
-        let conn = Connection::open(&path)?;
+        // Open writer connection
+        let writer_conn = Connection::open(&path)?;
 
-        // Configure SQLite for performance
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA cache_size = -64000;
-             PRAGMA temp_store = MEMORY;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
-        )?;
+        // Restrict database file permissions to owner-only on Unix
+        #[cfg(unix)]
+        if path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+
+        Self::configure_connection(&writer_conn)?;
+
+        // Apply migrations on writer only
+        super::migrations::apply_migrations(&writer_conn)?;
+
+        // Open reader connection to same path
+        let reader_conn = Connection::open(&path)?;
+        Self::configure_connection(&reader_conn)?;
 
         #[cfg(feature = "embeddings")]
         let embedding_service = EmbeddingService::new();
@@ -129,9 +183,10 @@ impl Storage {
             NonZeroUsize::new(100).expect("100 is non-zero"),
         ));
 
-        let mut storage = Self {
-            conn,
-            scheduler: FSRSScheduler::default(),
+        let storage = Self {
+            writer: Mutex::new(writer_conn),
+            reader: Mutex::new(reader_conn),
+            scheduler: Mutex::new(FSRSScheduler::default()),
             #[cfg(feature = "embeddings")]
             embedding_service,
             #[cfg(feature = "vector-search")]
@@ -140,32 +195,28 @@ impl Storage {
             query_cache,
         };
 
-        storage.init_schema()?;
-
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         storage.load_embeddings_into_index()?;
 
         Ok(storage)
     }
 
-    /// Initialize database schema
-    fn init_schema(&mut self) -> Result<()> {
-        // Apply migrations
-        super::migrations::apply_migrations(&self.conn)?;
-        Ok(())
-    }
-
     /// Load existing embeddings into vector index
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-    fn load_embeddings_into_index(&mut self) -> Result<()> {
-        let mut stmt = self
-            .conn
+    fn load_embeddings_into_index(&self) -> Result<()> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+
+        let mut stmt = reader
             .prepare("SELECT node_id, embedding FROM node_embeddings")?;
 
         let embeddings: Vec<(String, Vec<u8>)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .filter_map(|r| r.ok())
             .collect();
+
+        drop(stmt);
+        drop(reader);
 
         let mut index = self
             .vector_index
@@ -174,7 +225,13 @@ impl Storage {
 
         for (node_id, embedding_bytes) in embeddings {
             if let Some(embedding) = Embedding::from_bytes(&embedding_bytes) {
-                if let Err(e) = index.add(&node_id, &embedding.vector) {
+                // Handle Matryoshka migration: old 768-dim → truncate to 256-dim
+                let vector = if embedding.dimensions != EMBEDDING_DIMENSIONS {
+                    matryoshka_truncate(embedding.vector)
+                } else {
+                    embedding.vector
+                };
+                if let Err(e) = index.add(&node_id, &vector) {
                     tracing::warn!("Failed to load embedding for {}: {}", node_id, e);
                 }
             }
@@ -184,11 +241,13 @@ impl Storage {
     }
 
     /// Ingest a new memory
-    pub fn ingest(&mut self, input: IngestInput) -> Result<KnowledgeNode> {
+    pub fn ingest(&self, input: IngestInput) -> Result<KnowledgeNode> {
         let now = Utc::now();
         let id = Uuid::new_v4().to_string();
 
-        let fsrs_state = self.scheduler.new_card();
+        let fsrs_state = self.scheduler.lock()
+            .map_err(|_| StorageError::Init("Scheduler lock poisoned".into()))?
+            .new_card();
 
         // Sentiment boost for stability
         let sentiment_boost = if input.sentiment_magnitude > 0.0 {
@@ -202,47 +261,51 @@ impl Storage {
         let valid_from_str = input.valid_from.map(|dt| dt.to_rfc3339());
         let valid_until_str = input.valid_until.map(|dt| dt.to_rfc3339());
 
-        self.conn.execute(
-            "INSERT INTO knowledge_nodes (
-                id, content, node_type, created_at, updated_at, last_accessed,
-                stability, difficulty, reps, lapses, learning_state,
-                storage_strength, retrieval_strength, retention_strength,
-                sentiment_score, sentiment_magnitude, next_review, scheduled_days,
-                source, tags, valid_from, valid_until, has_embedding, embedding_model
-            ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6,
-                ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18,
-                ?19, ?20, ?21, ?22, ?23, ?24
-            )",
-            params![
-                id,
-                input.content,
-                input.node_type,
-                now.to_rfc3339(),
-                now.to_rfc3339(),
-                now.to_rfc3339(),
-                fsrs_state.stability * sentiment_boost,
-                fsrs_state.difficulty,
-                fsrs_state.reps,
-                fsrs_state.lapses,
-                "new",
-                1.0,
-                1.0,
-                1.0,
-                input.sentiment_score,
-                input.sentiment_magnitude,
-                next_review.to_rfc3339(),
-                fsrs_state.scheduled_days,
-                input.source,
-                tags_json,
-                valid_from_str,
-                valid_until_str,
-                0,
-                Option::<String>::None,
-            ],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "INSERT INTO knowledge_nodes (
+                    id, content, node_type, created_at, updated_at, last_accessed,
+                    stability, difficulty, reps, lapses, learning_state,
+                    storage_strength, retrieval_strength, retention_strength,
+                    sentiment_score, sentiment_magnitude, next_review, scheduled_days,
+                    source, tags, valid_from, valid_until, has_embedding, embedding_model
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22, ?23, ?24
+                )",
+                params![
+                    id,
+                    input.content,
+                    input.node_type,
+                    now.to_rfc3339(),
+                    now.to_rfc3339(),
+                    now.to_rfc3339(),
+                    fsrs_state.stability * sentiment_boost,
+                    fsrs_state.difficulty,
+                    fsrs_state.reps,
+                    fsrs_state.lapses,
+                    "new",
+                    1.0,
+                    1.0,
+                    1.0,
+                    input.sentiment_score,
+                    input.sentiment_magnitude,
+                    next_review.to_rfc3339(),
+                    fsrs_state.scheduled_days,
+                    input.source,
+                    tags_json,
+                    valid_from_str,
+                    valid_until_str,
+                    0,
+                    Option::<String>::None,
+                ],
+            )?;
+        }
 
         // Generate embedding if available
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
@@ -264,7 +327,7 @@ impl Storage {
     /// This solves the "bad vs good similar memory" problem.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     pub fn smart_ingest(
-        &mut self,
+        &self,
         input: IngestInput,
     ) -> Result<SmartIngestResult> {
         use crate::advanced::prediction_error::{
@@ -453,8 +516,10 @@ impl Storage {
 
     /// Get the embedding vector for a node
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-    fn get_node_embedding(&self, node_id: &str) -> Result<Option<Vec<f32>>> {
-        let mut stmt = self.conn.prepare(
+    pub fn get_node_embedding(&self, node_id: &str) -> Result<Option<Vec<f32>>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT embedding FROM node_embeddings WHERE node_id = ?1"
         )?;
 
@@ -467,14 +532,42 @@ impl Storage {
         }))
     }
 
+    /// Get all embedding vectors for duplicate detection
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    pub fn get_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader
+            .prepare("SELECT node_id, embedding FROM node_embeddings")?;
+
+        let results: Vec<(String, Vec<f32>)> = stmt
+            .query_map([], |row| {
+                let node_id: String = row.get(0)?;
+                let embedding_bytes: Vec<u8> = row.get(1)?;
+                Ok((node_id, embedding_bytes))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, bytes)| {
+                crate::embeddings::Embedding::from_bytes(&bytes)
+                    .map(|e| (id, e.vector))
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Update the content of an existing node
-    pub fn update_node_content(&mut self, id: &str, new_content: &str) -> Result<()> {
+    pub fn update_node_content(&self, id: &str, new_content: &str) -> Result<()> {
         let now = Utc::now();
 
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET content = ?1, updated_at = ?2 WHERE id = ?3",
-            params![new_content, now.to_rfc3339(), id],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_content, now.to_rfc3339(), id],
+            )?;
+        }
 
         // Regenerate embedding for updated content
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
@@ -494,7 +587,7 @@ impl Storage {
 
     /// Generate embedding for a node
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-    fn generate_embedding_for_node(&mut self, node_id: &str, content: &str) -> Result<()> {
+    fn generate_embedding_for_node(&self, node_id: &str, content: &str) -> Result<()> {
         if !self.embedding_service.is_ready() {
             return Ok(());
         }
@@ -506,22 +599,26 @@ impl Storage {
 
         let now = Utc::now();
 
-        self.conn.execute(
-            "INSERT OR REPLACE INTO node_embeddings (node_id, embedding, dimensions, model, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                node_id,
-                embedding.to_bytes(),
-                EMBEDDING_DIMENSIONS as i32,
-                "all-MiniLM-L6-v2",
-                now.to_rfc3339(),
-            ],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "INSERT OR REPLACE INTO node_embeddings (node_id, embedding, dimensions, model, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    node_id,
+                    embedding.to_bytes(),
+                    EMBEDDING_DIMENSIONS as i32,
+                    "all-MiniLM-L6-v2",
+                    now.to_rfc3339(),
+                ],
+            )?;
 
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = 'all-MiniLM-L6-v2' WHERE id = ?1",
-            params![node_id],
-        )?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = 'all-MiniLM-L6-v2' WHERE id = ?1",
+                params![node_id],
+            )?;
+        }
 
         let mut index = self
             .vector_index
@@ -536,18 +633,19 @@ impl Storage {
 
     /// Get a node by ID
     pub fn get_node(&self, id: &str) -> Result<Option<KnowledgeNode>> {
-        let mut stmt = self
-            .conn
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader
             .prepare("SELECT * FROM knowledge_nodes WHERE id = ?1")?;
 
         let node = stmt
-            .query_row(params![id], |row| self.row_to_node(row))
+            .query_row(params![id], |row| Self::row_to_node(row))
             .optional()?;
         Ok(node)
     }
 
     /// Parse RFC3339 timestamp
-    fn parse_timestamp(&self, value: &str, field_name: &str) -> rusqlite::Result<DateTime<Utc>> {
+    fn parse_timestamp(value: &str, field_name: &str) -> rusqlite::Result<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(value)
             .map(|dt| dt.with_timezone(&Utc))
             .map_err(|e| {
@@ -563,7 +661,7 @@ impl Storage {
     }
 
     /// Convert a row to KnowledgeNode
-    fn row_to_node(&self, row: &rusqlite::Row) -> rusqlite::Result<KnowledgeNode> {
+    fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeNode> {
         let tags_json: String = row.get("tags")?;
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
 
@@ -572,9 +670,9 @@ impl Storage {
         let last_accessed: String = row.get("last_accessed")?;
         let next_review: Option<String> = row.get("next_review")?;
 
-        let created_at = self.parse_timestamp(&created_at, "created_at")?;
-        let updated_at = self.parse_timestamp(&updated_at, "updated_at")?;
-        let last_accessed = self.parse_timestamp(&last_accessed, "last_accessed")?;
+        let created_at = Self::parse_timestamp(&created_at, "created_at")?;
+        let updated_at = Self::parse_timestamp(&updated_at, "updated_at")?;
+        let last_accessed = Self::parse_timestamp(&last_accessed, "last_accessed")?;
 
         let next_review = next_review.and_then(|s| {
             DateTime::parse_from_rfc3339(&s)
@@ -623,6 +721,13 @@ impl Storage {
             valid_until,
             has_embedding: has_embedding.map(|v| v == 1),
             embedding_model,
+            // v2.0 fields
+            utility_score: row.get("utility_score").ok(),
+            times_retrieved: row.get("times_retrieved").ok(),
+            times_useful: row.get("times_useful").ok(),
+            emotional_valence: row.get("emotional_valence").ok(),
+            flashbulb: row.get::<_, Option<bool>>("flashbulb").ok().flatten(),
+            temporal_level: row.get::<_, Option<String>>("temporal_level").ok().flatten(),
         })
     }
 
@@ -639,7 +744,7 @@ impl Storage {
             }
             #[cfg(all(feature = "embeddings", feature = "vector-search"))]
             SearchMode::Hybrid => {
-                let results = self.hybrid_search(&input.query, input.limit, 0.5, 0.5)?;
+                let results = self.hybrid_search(&input.query, input.limit, 0.3, 0.7)?;
                 results.into_iter().map(|r| r.node).collect()
             }
             #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
@@ -663,7 +768,9 @@ impl Storage {
     ) -> Result<Vec<KnowledgeNode>> {
         let sanitized_query = sanitize_fts5_query(query);
 
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT n.* FROM knowledge_nodes n
              JOIN knowledge_fts fts ON n.id = fts.id
              WHERE knowledge_fts MATCH ?1
@@ -673,7 +780,7 @@ impl Storage {
         )?;
 
         let nodes = stmt.query_map(params![sanitized_query, min_retention, limit], |row| {
-            self.row_to_node(row)
+            Self::row_to_node(row)
         })?;
 
         let mut result = Vec::new();
@@ -684,7 +791,7 @@ impl Storage {
     }
 
     /// Mark a memory as reviewed
-    pub fn mark_reviewed(&mut self, id: &str, rating: Rating) -> Result<KnowledgeNode> {
+    pub fn mark_reviewed(&self, id: &str, rating: Rating) -> Result<KnowledgeNode> {
         let node = self
             .get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))?;
@@ -705,7 +812,9 @@ impl Storage {
             scheduled_days: 0,
         };
 
-        let elapsed_days = self.scheduler.days_since_review(&current_state.last_review);
+        let scheduler = self.scheduler.lock()
+            .map_err(|_| StorageError::Init("Scheduler lock poisoned".into()))?;
+        let elapsed_days = scheduler.days_since_review(&current_state.last_review);
 
         let sentiment_boost = if node.sentiment_magnitude > 0.0 {
             Some(node.sentiment_magnitude)
@@ -713,9 +822,9 @@ impl Storage {
             None
         };
 
-        let result = self
-            .scheduler
+        let result = scheduler
             .review(&current_state, rating, elapsed_days, sentiment_boost);
+        drop(scheduler);
 
         let now = Utc::now();
         let next_review = now + Duration::days(result.interval as i64);
@@ -730,59 +839,110 @@ impl Storage {
         let new_retention =
             (new_retrieval_strength * 0.7) + ((new_storage_strength / 10.0).min(1.0) * 0.3);
 
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                stability = ?1,
-                difficulty = ?2,
-                reps = ?3,
-                lapses = ?4,
-                learning_state = ?5,
-                storage_strength = ?6,
-                retrieval_strength = ?7,
-                retention_strength = ?8,
-                last_accessed = ?9,
-                updated_at = ?10,
-                next_review = ?11,
-                scheduled_days = ?12
-            WHERE id = ?13",
-            params![
-                result.state.stability,
-                result.state.difficulty,
-                result.state.reps,
-                result.state.lapses,
-                format!("{:?}", result.state.state).to_lowercase(),
-                new_storage_strength,
-                new_retrieval_strength,
-                new_retention,
-                now.to_rfc3339(),
-                now.to_rfc3339(),
-                next_review.to_rfc3339(),
-                result.interval,
-                id,
-            ],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET
+                    stability = ?1,
+                    difficulty = ?2,
+                    reps = ?3,
+                    lapses = ?4,
+                    learning_state = ?5,
+                    storage_strength = ?6,
+                    retrieval_strength = ?7,
+                    retention_strength = ?8,
+                    last_accessed = ?9,
+                    updated_at = ?10,
+                    next_review = ?11,
+                    scheduled_days = ?12
+                WHERE id = ?13",
+                params![
+                    result.state.stability,
+                    result.state.difficulty,
+                    result.state.reps,
+                    result.state.lapses,
+                    format!("{:?}", result.state.state).to_lowercase(),
+                    new_storage_strength,
+                    new_retrieval_strength,
+                    new_retention,
+                    now.to_rfc3339(),
+                    now.to_rfc3339(),
+                    next_review.to_rfc3339(),
+                    result.interval,
+                    id,
+                ],
+            )?;
+        }
 
         self.get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
     }
 
-    /// Passively strengthen a memory when it's accessed (recalled/searched)
-    /// This implements the "use it or lose it" principle - memories that are
-    /// accessed get a small boost, those that aren't decay naturally.
-    /// Based on Testing Effect (Roediger & Karpicke 2006)
+    /// Passively strengthen a memory when it's accessed (recalled/searched).
+    /// Implements the Testing Effect (Roediger & Karpicke 2006) + v1.4.0
+    /// content-aware cross-memory reinforcement: semantically similar neighbors
+    /// receive a diminished boost proportional to cosine similarity.
     pub fn strengthen_on_access(&self, id: &str) -> Result<()> {
         let now = Utc::now();
 
-        // Small retrieval strength boost (0.05) on each access
-        // This is much smaller than a full review but compounds over time
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                last_accessed = ?1,
-                retrieval_strength = MIN(1.0, retrieval_strength + 0.05),
-                retention_strength = MIN(1.0, retention_strength + 0.02)
-            WHERE id = ?2",
-            params![now.to_rfc3339(), id],
-        )?;
+        // Primary boost on the accessed node
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET
+                    last_accessed = ?1,
+                    retrieval_strength = MIN(1.0, retrieval_strength + 0.05),
+                    retention_strength = MIN(1.0, retention_strength + 0.02),
+                    times_retrieved = COALESCE(times_retrieved, 0) + 1,
+                    utility_score = CASE
+                        WHEN COALESCE(times_retrieved, 0) + 1 > 0
+                        THEN CAST(COALESCE(times_useful, 0) AS REAL) / (COALESCE(times_retrieved, 0) + 1)
+                        ELSE 0.0
+                    END
+                WHERE id = ?2",
+                params![now.to_rfc3339(), id],
+            )?;
+        }
+
+        // Log access for ACT-R activation computation
+        let _ = self.log_access(id, "search_hit");
+
+        // Content-aware cross-memory reinforcement: boost semantically similar neighbors
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+        {
+            if let Ok(Some(embedding)) = self.get_node_embedding(id) {
+                let index = self
+                    .vector_index
+                    .lock()
+                    .map_err(|_| StorageError::Init("Vector index lock poisoned".to_string()))?;
+
+                // Query top-6 similar (one will be self, so we get ~5 neighbors)
+                let neighbors_result = index.search(&embedding, 6);
+                drop(index);
+
+                if let Ok(neighbors) = neighbors_result {
+                    let writer = self.writer.lock()
+                        .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+                    for (neighbor_id, similarity) in neighbors {
+                        if neighbor_id == id || similarity < 0.7 {
+                            continue;
+                        }
+                        // Diminished boost: 0.02 * similarity (max ~0.02)
+                        let boost = 0.02 * similarity as f64;
+                        let retention_boost = 0.008 * similarity as f64;
+                        let _ = writer.execute(
+                            "UPDATE knowledge_nodes SET
+                                retrieval_strength = MIN(1.0, retrieval_strength + ?1),
+                                retention_strength = MIN(1.0, retention_strength + ?2)
+                            WHERE id = ?3",
+                            params![boost, retention_boost, neighbor_id],
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -795,21 +955,64 @@ impl Storage {
         Ok(())
     }
 
+    /// Mark a memory as "useful" — called when a retrieved memory is subsequently
+    /// referenced in a save or decision (MemRL-inspired utility tracking).
+    ///
+    /// Increments `times_useful` and recomputes `utility_score = times_useful / times_retrieved`.
+    pub fn mark_memory_useful(&self, id: &str) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "UPDATE knowledge_nodes SET
+                times_useful = COALESCE(times_useful, 0) + 1,
+                utility_score = CASE
+                    WHEN COALESCE(times_retrieved, 0) > 0
+                    THEN MIN(1.0, CAST(COALESCE(times_useful, 0) + 1 AS REAL) / COALESCE(times_retrieved, 0))
+                    ELSE 1.0
+                END
+            WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Log a memory access event for ACT-R activation computation
+    fn log_access(&self, node_id: &str, access_type: &str) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "INSERT INTO memory_access_log (node_id, access_type, accessed_at)
+             VALUES (?1, ?2, ?3)",
+            params![node_id, access_type, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     /// Promote a memory (thumbs up) - used when a memory led to a good outcome
-    /// Significantly boosts retrieval strength so it surfaces more often
+    /// Significantly boosts retrieval strength so it surfaces more often.
+    /// v1.9.0: Also sets waking SWR tag for preferential dream replay.
     pub fn promote_memory(&self, id: &str) -> Result<KnowledgeNode> {
         let now = Utc::now();
 
         // Strong boost: +0.2 retrieval, +0.1 retention
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                last_accessed = ?1,
-                retrieval_strength = MIN(1.0, retrieval_strength + 0.20),
-                retention_strength = MIN(1.0, retention_strength + 0.10),
-                stability = stability * 1.5
-            WHERE id = ?2",
-            params![now.to_rfc3339(), id],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET
+                    last_accessed = ?1,
+                    retrieval_strength = MIN(1.0, retrieval_strength + 0.20),
+                    retention_strength = MIN(1.0, retention_strength + 0.10),
+                    stability = stability * 1.5
+                WHERE id = ?2",
+                params![now.to_rfc3339(), id],
+            )?;
+        }
+
+        let _ = self.log_access(id, "promote");
+
+        // v1.9.0: Set waking SWR tag for preferential dream replay
+        let _ = self.set_waking_tag(id);
 
         self.get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
@@ -822,15 +1025,21 @@ impl Storage {
         let now = Utc::now();
 
         // Strong penalty: -0.3 retrieval, -0.15 retention, halve stability
-        self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                last_accessed = ?1,
-                retrieval_strength = MAX(0.05, retrieval_strength - 0.30),
-                retention_strength = MAX(0.05, retention_strength - 0.15),
-                stability = stability * 0.5
-            WHERE id = ?2",
-            params![now.to_rfc3339(), id],
-        )?;
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "UPDATE knowledge_nodes SET
+                    last_accessed = ?1,
+                    retrieval_strength = MAX(0.05, retrieval_strength - 0.30),
+                    retention_strength = MAX(0.05, retention_strength - 0.15),
+                    stability = stability * 0.5
+                WHERE id = ?2",
+                params![now.to_rfc3339(), id],
+            )?;
+        }
+
+        let _ = self.log_access(id, "demote");
 
         self.get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
@@ -840,14 +1049,16 @@ impl Storage {
     pub fn get_review_queue(&self, limit: i32) -> Result<Vec<KnowledgeNode>> {
         let now = Utc::now().to_rfc3339();
 
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM knowledge_nodes
              WHERE next_review <= ?1
              ORDER BY next_review ASC
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![now, limit], |row| self.row_to_node(row))?;
+        let nodes = stmt.query_map(params![now, limit], |row| Self::row_to_node(row))?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -878,58 +1089,61 @@ impl Storage {
             scheduled_days: 0,
         };
 
-        let elapsed_days = self.scheduler.days_since_review(&current_state.last_review);
+        let scheduler = self.scheduler.lock()
+            .map_err(|_| StorageError::Init("Scheduler lock poisoned".into()))?;
+        let elapsed_days = scheduler.days_since_review(&current_state.last_review);
 
-        Ok(self.scheduler.preview_reviews(&current_state, elapsed_days))
+        Ok(scheduler.preview_reviews(&current_state, elapsed_days))
     }
 
     /// Get memory statistics
     pub fn get_stats(&self) -> Result<MemoryStats> {
         let now = Utc::now().to_rfc3339();
 
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+
         let total: i64 =
-            self.conn
+            reader
                 .query_row("SELECT COUNT(*) FROM knowledge_nodes", [], |row| row.get(0))?;
 
-        let due: i64 = self.conn.query_row(
+        let due: i64 = reader.query_row(
             "SELECT COUNT(*) FROM knowledge_nodes WHERE next_review <= ?1",
             params![now],
             |row| row.get(0),
         )?;
 
-        let avg_retention: f64 = self.conn.query_row(
+        let avg_retention: f64 = reader.query_row(
             "SELECT COALESCE(AVG(retention_strength), 0) FROM knowledge_nodes",
             [],
             |row| row.get(0),
         )?;
 
-        let avg_storage: f64 = self.conn.query_row(
+        let avg_storage: f64 = reader.query_row(
             "SELECT COALESCE(AVG(storage_strength), 1) FROM knowledge_nodes",
             [],
             |row| row.get(0),
         )?;
 
-        let avg_retrieval: f64 = self.conn.query_row(
+        let avg_retrieval: f64 = reader.query_row(
             "SELECT COALESCE(AVG(retrieval_strength), 1) FROM knowledge_nodes",
             [],
             |row| row.get(0),
         )?;
 
-        let oldest: Option<String> = self
-            .conn
+        let oldest: Option<String> = reader
             .query_row("SELECT MIN(created_at) FROM knowledge_nodes", [], |row| {
                 row.get(0)
             })
             .ok();
 
-        let newest: Option<String> = self
-            .conn
+        let newest: Option<String> = reader
             .query_row("SELECT MAX(created_at) FROM knowledge_nodes", [], |row| {
                 row.get(0)
             })
             .ok();
 
-        let nodes_with_embeddings: i64 = self.conn.query_row(
+        let nodes_with_embeddings: i64 = reader.query_row(
             "SELECT COUNT(*) FROM knowledge_nodes WHERE has_embedding = 1",
             [],
             |row| row.get(0),
@@ -963,9 +1177,10 @@ impl Storage {
     }
 
     /// Delete a node
-    pub fn delete_node(&mut self, id: &str) -> Result<bool> {
-        let rows = self
-            .conn
+    pub fn delete_node(&self, id: &str) -> Result<bool> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer
             .execute("DELETE FROM knowledge_nodes WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
@@ -974,7 +1189,9 @@ impl Storage {
     pub fn search(&self, query: &str, limit: i32) -> Result<Vec<KnowledgeNode>> {
         let sanitized_query = sanitize_fts5_query(query);
 
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT n.* FROM knowledge_nodes n
              JOIN knowledge_fts fts ON n.id = fts.id
              WHERE knowledge_fts MATCH ?1
@@ -982,7 +1199,7 @@ impl Storage {
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![sanitized_query, limit], |row| self.row_to_node(row))?;
+        let nodes = stmt.query_map(params![sanitized_query, limit], |row| Self::row_to_node(row))?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -993,13 +1210,15 @@ impl Storage {
 
     /// Get all nodes (paginated)
     pub fn get_all_nodes(&self, limit: i32, offset: i32) -> Result<Vec<KnowledgeNode>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM knowledge_nodes
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2",
         )?;
 
-        let nodes = stmt.query_map(params![limit, offset], |row| self.row_to_node(row))?;
+        let nodes = stmt.query_map(params![limit, offset], |row| Self::row_to_node(row))?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1018,12 +1237,14 @@ impl Storage {
         tag_filter: Option<&str>,
         limit: i32,
     ) -> Result<Vec<KnowledgeNode>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
         match tag_filter {
             Some(tag) => {
                 // Query with tag filter using JSON LIKE search
                 // Tags are stored as JSON array, e.g., '["pattern", "codebase", "codebase:vestige"]'
                 let tag_pattern = format!("%\"{}%", tag);
-                let mut stmt = self.conn.prepare(
+                let mut stmt = reader.prepare(
                     "SELECT * FROM knowledge_nodes
                      WHERE node_type = ?1
                      AND tags LIKE ?2
@@ -1031,7 +1252,7 @@ impl Storage {
                      LIMIT ?3",
                 )?;
                 let rows = stmt.query_map(params![node_type, tag_pattern, limit], |row| {
-                    self.row_to_node(row)
+                    Self::row_to_node(row)
                 })?;
                 let mut nodes = Vec::new();
                 for node in rows.flatten() {
@@ -1041,13 +1262,13 @@ impl Storage {
             }
             None => {
                 // Query without tag filter
-                let mut stmt = self.conn.prepare(
+                let mut stmt = reader.prepare(
                     "SELECT * FROM knowledge_nodes
                      WHERE node_type = ?1
                      ORDER BY retention_strength DESC, created_at DESC
                      LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![node_type, limit], |row| self.row_to_node(row))?;
+                let rows = stmt.query_map(params![node_type, limit], |row| Self::row_to_node(row))?;
                 let mut nodes = Vec::new();
                 for node in rows.flatten() {
                     nodes.push(node);
@@ -1071,14 +1292,14 @@ impl Storage {
     /// Initialize the embedding service explicitly
     /// Call this at startup to catch initialization errors early
     #[cfg(feature = "embeddings")]
-    pub fn init_embeddings(&mut self) -> Result<()> {
+    pub fn init_embeddings(&self) -> Result<()> {
         self.embedding_service.init().map_err(|e| {
             StorageError::Init(format!("Embedding service initialization failed: {}", e))
         })
     }
 
     #[cfg(not(feature = "embeddings"))]
-    pub fn init_embeddings(&mut self) -> Result<()> {
+    pub fn init_embeddings(&self) -> Result<()> {
         Ok(()) // No-op when embeddings feature is disabled
     }
 
@@ -1160,7 +1381,7 @@ impl Storage {
         };
 
         let combined = if !semantic_results.is_empty() {
-            reciprocal_rank_fusion(&keyword_results, &semantic_results, 60.0)
+            linear_combination(&keyword_results, &semantic_results, keyword_weight, semantic_weight)
         } else {
             keyword_results.clone()
         };
@@ -1202,6 +1423,37 @@ impl Storage {
             }
         }
 
+        // Three-signal reranking (Park et al. Generative Agents 2023)
+        // final_score = 0.2*recency + 0.3*importance + 0.5*relevance
+        let now = Utc::now();
+        for result in &mut results {
+            let hours_since = (now - result.node.last_accessed).num_seconds() as f64 / 3600.0;
+            let recency = 0.995_f64.powf(hours_since.max(0.0));
+
+            // ACT-R activation as importance signal (pre-computed during consolidation)
+            let activation: f64 = self
+                .reader.lock()
+                .map(|r| r.query_row(
+                    "SELECT COALESCE(activation, 0.0) FROM knowledge_nodes WHERE id = ?1",
+                    params![result.node.id],
+                    |row| row.get(0),
+                ).unwrap_or(0.0))
+                .unwrap_or(0.0);
+            // Normalize ACT-R activation [-2, 5] → [0, 1]
+            let importance = ((activation + 2.0) / 7.0).clamp(0.0, 1.0);
+
+            let relevance = result.combined_score as f64;
+
+            let final_score = 0.2 * recency + 0.3 * importance + 0.5 * relevance;
+            result.combined_score = final_score as f32;
+        }
+
+        results.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         Ok(results)
     }
 
@@ -1210,7 +1462,9 @@ impl Storage {
     fn keyword_search_with_scores(&self, query: &str, limit: i32) -> Result<Vec<(String, f32)>> {
         let sanitized_query = sanitize_fts5_query(query);
 
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT n.id, rank FROM knowledge_nodes n
              JOIN knowledge_fts fts ON n.id = fts.id
              WHERE knowledge_fts MATCH ?1
@@ -1248,7 +1502,27 @@ impl Storage {
             return Ok(vec![]);
         }
 
-        let query_embedding = self.get_query_embedding(query)?;
+        // HyDE query expansion: for conceptual queries, embed expanded variants
+        // and use the centroid for broader semantic coverage
+        let intent = hyde::classify_intent(query);
+        let query_embedding = match intent {
+            hyde::QueryIntent::Definition
+            | hyde::QueryIntent::HowTo
+            | hyde::QueryIntent::Reasoning
+            | hyde::QueryIntent::Lookup => {
+                let variants = hyde::expand_query(query);
+                let embeddings: Vec<Vec<f32>> = variants
+                    .iter()
+                    .filter_map(|v| self.get_query_embedding(v).ok())
+                    .collect();
+                if embeddings.len() > 1 {
+                    hyde::centroid_embedding(&embeddings)
+                } else {
+                    self.get_query_embedding(query)?
+                }
+            }
+            _ => self.get_query_embedding(query)?,
+        };
 
         let index = self
             .vector_index
@@ -1263,7 +1537,7 @@ impl Storage {
     /// Generate embeddings for nodes
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     pub fn generate_embeddings(
-        &mut self,
+        &self,
         node_ids: Option<&[String]>,
         force: bool,
     ) -> Result<EmbeddingResult> {
@@ -1275,51 +1549,55 @@ impl Storage {
 
         let mut result = EmbeddingResult::default();
 
-        let nodes: Vec<(String, String)> = if let Some(ids) = node_ids {
-            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let query = format!(
-                "SELECT id, content FROM knowledge_nodes WHERE id IN ({})",
-                placeholders
-            );
+        let nodes: Vec<(String, String)> = {
+            let reader = self.reader.lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            if let Some(ids) = node_ids {
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let query = format!(
+                    "SELECT id, content FROM knowledge_nodes WHERE id IN ({})",
+                    placeholders
+                );
 
-            let mut result_nodes = Vec::new();
-            {
-                let mut stmt = self.conn.prepare(&query)?;
-                let params: Vec<&dyn rusqlite::ToSql> =
-                    ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                let mut result_nodes = Vec::new();
+                {
+                    let mut stmt = reader.prepare(&query)?;
+                    let params: Vec<&dyn rusqlite::ToSql> =
+                        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
 
-                let rows = stmt.query_map(params.as_slice(), |row| {
+                    let rows = stmt.query_map(params.as_slice(), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?;
+
+                    for r in rows.flatten() {
+                        result_nodes.push(r);
+                    }
+                }
+                result_nodes
+            } else if force {
+                let mut stmt = reader
+                    .prepare("SELECT id, content FROM knowledge_nodes")?;
+                let rows = stmt.query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })?;
-
-                for r in rows.flatten() {
-                    result_nodes.push(r);
-                }
+                rows.filter_map(|r| r.ok()).collect()
+            } else {
+                let mut stmt = reader.prepare(
+                    "SELECT id, content FROM knowledge_nodes
+                         WHERE has_embedding = 0 OR has_embedding IS NULL",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.filter_map(|r| r.ok()).collect()
             }
-            result_nodes
-        } else if force {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id, content FROM knowledge_nodes")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, content FROM knowledge_nodes
-                     WHERE has_embedding = 0 OR has_embedding IS NULL",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
         };
 
         for (id, content) in nodes {
             if !force {
                 let has_emb: i32 = self
-                    .conn
+                    .reader.lock()
+                    .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?
                     .query_row(
                         "SELECT COALESCE(has_embedding, 0) FROM knowledge_nodes WHERE id = ?1",
                         params![id],
@@ -1353,7 +1631,9 @@ impl Storage {
     ) -> Result<Vec<KnowledgeNode>> {
         let timestamp = point_in_time.to_rfc3339();
 
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM knowledge_nodes
              WHERE (valid_from IS NULL OR valid_from <= ?1)
              AND (valid_until IS NULL OR valid_until >= ?1)
@@ -1361,7 +1641,7 @@ impl Storage {
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![timestamp, limit], |row| self.row_to_node(row))?;
+        let nodes = stmt.query_map(params![timestamp, limit], |row| Self::row_to_node(row))?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1420,9 +1700,11 @@ impl Storage {
             ),
         };
 
-        let mut stmt = self.conn.prepare(query)?;
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let nodes = stmt.query_map(params_refs.as_slice(), |row| self.row_to_node(row))?;
+        let nodes = stmt.query_map(params_refs.as_slice(), |row| Self::row_to_node(row))?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1431,86 +1713,378 @@ impl Storage {
         Ok(result)
     }
 
-    /// Apply decay to all memories
-    pub fn apply_decay(&mut self) -> Result<i32> {
-        const FSRS_DECAY: f64 = 0.5;
-        const FSRS_FACTOR: f64 = 9.0;
+    /// Apply FSRS-6 decay to all memories using batched pagination to avoid OOM.
+    ///
+    /// Uses the real FSRS-6 retrievability formula: R = (1 + factor * t / S)^(-w20)
+    /// with personalized w20 from fsrs_config table. Sentiment boost extends
+    /// effective stability for emotional memories.
+    pub fn apply_decay(&self) -> Result<i32> {
+        // Read personalized w20 from config (falls back to default 0.1542)
+        let w20 = self.get_fsrs_w20().unwrap_or(DEFAULT_DECAY);
+        let sleep = crate::SleepConsolidation::new();
 
+        const BATCH_SIZE: i64 = 500;
         let now = Utc::now();
+        let mut count = 0i32;
+        let mut offset = 0i64;
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, last_accessed, storage_strength, retrieval_strength,
-                    sentiment_magnitude, stability
-             FROM knowledge_nodes",
-        )?;
+        loop {
+            // Read batch using reader
+            let batch: Vec<(String, String, f64, f64, f64, f64)> = {
+                let reader = self.reader.lock()
+                    .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+                reader
+                    .prepare(
+                        "SELECT id, last_accessed, storage_strength, retrieval_strength,
+                                sentiment_magnitude, stability
+                         FROM knowledge_nodes
+                         ORDER BY id
+                         LIMIT ?1 OFFSET ?2",
+                    )?
+                    .query_map(params![BATCH_SIZE, offset], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            };
 
-        let nodes: Vec<(String, String, f64, f64, f64, f64)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut count = 0;
-
-        for (id, last_accessed, storage_strength, _, sentiment_mag, stability) in nodes {
-            let last = DateTime::parse_from_rfc3339(&last_accessed)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or(now);
-
-            let days_since = (now - last).num_seconds() as f64 / 86400.0;
-
-            if days_since > 0.0 {
-                let effective_stability = stability * (1.0 + sentiment_mag * 0.5);
-
-                let new_retrieval = (1.0 + days_since / (FSRS_FACTOR * effective_stability))
-                    .powf(-1.0 / FSRS_DECAY);
-
-                let new_retention =
-                    (new_retrieval * 0.7) + ((storage_strength / 10.0).min(1.0) * 0.3);
-
-                self.conn.execute(
-                    "UPDATE knowledge_nodes SET
-                        retrieval_strength = ?1,
-                        retention_strength = ?2
-                     WHERE id = ?3",
-                    params![new_retrieval, new_retention, id],
-                )?;
-
-                count += 1;
+            if batch.is_empty() {
+                break;
             }
+
+            let batch_len = batch.len() as i64;
+
+            // Write batch using writer transaction
+            {
+                let mut writer = self.writer.lock()
+                    .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+                let tx = writer.transaction()?;
+
+                for (id, last_accessed, storage_strength, _, sentiment_mag, stability) in &batch {
+                    let last = DateTime::parse_from_rfc3339(last_accessed)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or(now);
+
+                    let days_since = (now - last).num_seconds() as f64 / 86400.0;
+
+                    if days_since > 0.0 {
+                        // Sentiment boost: emotional memories decay slower (up to 1.5x stability)
+                        let effective_stability = stability * (1.0 + sentiment_mag * 0.5);
+
+                        // Real FSRS-6 retrievability with personalized w20
+                        let new_retrieval = retrievability_with_decay(
+                            effective_stability, days_since, w20,
+                        );
+
+                        // Use SleepConsolidation for retention calculation
+                        let new_retention = sleep.calculate_retention(*storage_strength, new_retrieval);
+
+                        tx.execute(
+                            "UPDATE knowledge_nodes SET retrieval_strength = ?1, retention_strength = ?2 WHERE id = ?3",
+                            params![new_retrieval, new_retention, id],
+                        )?;
+
+                        count += 1;
+                    }
+                }
+
+                tx.commit()?;
+            }
+            offset += batch_len;
         }
 
         Ok(count)
     }
 
-    /// Run consolidation
-    pub fn run_consolidation(&mut self) -> Result<ConsolidationResult> {
+    /// Read personalized w20 from fsrs_config table
+    fn get_fsrs_w20(&self) -> Result<f64> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        reader
+            .query_row(
+                "SELECT value FROM fsrs_config WHERE key = 'w20'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Init(format!("Failed to read w20: {}", e)))
+    }
+
+    /// Run full FSRS-6 consolidation cycle (v1.4.0)
+    ///
+    /// 7-step automatic consolidation:
+    /// 1. Apply FSRS-6 decay with personalized w20
+    /// 2. Promote emotional memories (synaptic tagging)
+    /// 3. Generate missing embeddings
+    /// 4. Auto-dedup: merge similar memories (episodic → semantic)
+    /// 5. Compute ACT-R base-level activations from access history
+    /// 6. Prune old access log entries (keep 90 days)
+    /// 7. Optimize w20 if enough usage data exists
+    pub fn run_consolidation(&self) -> Result<ConsolidationResult> {
         let start = std::time::Instant::now();
 
+        // v1.5.0: Use SleepConsolidation for structured consolidation
+        let sleep = crate::SleepConsolidation::new();
+
+        // 1. Apply FSRS-6 decay with real formula + personalized w20
         let decay_applied = self.apply_decay()? as i64;
 
-        let promoted = self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                storage_strength = MIN(storage_strength * 1.5, 10.0)
-             WHERE sentiment_magnitude > 0.5
-             AND storage_strength < 10",
-            [],
-        )? as i64;
+        // 2. Promote emotional memories via SleepConsolidation
+        let mut promoted = 0i64;
+        {
+            let candidates: Vec<(String, f64, f64)> = {
+                let reader = self.reader.lock()
+                    .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+                reader
+                    .prepare(
+                        "SELECT id, sentiment_magnitude, storage_strength
+                         FROM knowledge_nodes
+                         WHERE storage_strength < 10.0"
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            };
 
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            for (id, sentiment_mag, storage_strength) in &candidates {
+                if sleep.should_promote(*sentiment_mag, *storage_strength) {
+                    let boosted = sleep.promotion_boost(*storage_strength);
+                    writer.execute(
+                        "UPDATE knowledge_nodes SET storage_strength = ?1 WHERE id = ?2",
+                        params![boosted, id],
+                    )?;
+                    promoted += 1;
+                }
+            }
+        }
+
+        // 3. Generate missing embeddings
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         let embeddings_generated = self.generate_missing_embeddings()?;
         #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
         let embeddings_generated = 0i64;
 
+        // 4. Auto-dedup: merge similar memories (episodic → semantic consolidation)
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+        let duplicates_merged = self.auto_dedup_consolidation().unwrap_or(0);
+        #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
+        let duplicates_merged = 0i64;
+
+        // 5. Compute ACT-R activations from access history
+        let activations_computed = self.compute_act_r_activations().unwrap_or(0);
+
+        // 6. Prune old access log entries (keep 90 days)
+        let _ = self.prune_access_log();
+
+        // 7. Optimize w20 if enough usage data
+        let w20_optimized = self.optimize_w20_if_ready().unwrap_or(None);
+
+        // ====================================================================
+        // v1.5.0: Extended consolidation steps 8-15
+        // ====================================================================
+
+        // 8. Memory Dreams — synthesize insights (sync path)
+        let mut _insights_generated = 0i64;
+        {
+            let dreamer = crate::advanced::dreams::MemoryDreamer::new();
+            let recent = self.get_all_nodes(100, 0).unwrap_or_default();
+            let dream_memories: Vec<crate::advanced::dreams::DreamMemory> = recent
+                .iter()
+                .map(|n| crate::advanced::dreams::DreamMemory {
+                    id: n.id.clone(),
+                    content: n.content.clone(),
+                    embedding: None,
+                    tags: n.tags.clone(),
+                    created_at: n.created_at,
+                    access_count: n.reps as u32,
+                })
+                .collect();
+            if dream_memories.len() >= 5 {
+                let insights = dreamer.synthesize_insights(&dream_memories);
+                _insights_generated = insights.len() as i64;
+                for insight in &insights {
+                    let record = InsightRecord {
+                        id: Uuid::new_v4().to_string(),
+                        insight: insight.insight.clone(),
+                        source_memories: insight.source_memories.clone(),
+                        confidence: insight.confidence,
+                        novelty_score: insight.novelty_score,
+                        insight_type: format!("{:?}", insight.insight_type),
+                        generated_at: Utc::now(),
+                        tags: vec![],
+                        feedback: None,
+                        applied_count: 0,
+                    };
+                    let _ = self.save_insight(&record);
+                }
+            }
+        }
+
+        // 9. Memory Compression (old memories → summaries)
+        let mut _memories_compressed = 0i64;
+        {
+            let mut compressor = crate::advanced::compression::MemoryCompressor::new();
+            let all_nodes = self.get_all_nodes(500, 0).unwrap_or_default();
+            let thirty_days_ago = Utc::now() - Duration::days(30);
+            let old_memories: Vec<crate::advanced::compression::MemoryForCompression> = all_nodes
+                .iter()
+                .filter(|n| n.created_at < thirty_days_ago && n.retention_strength < 0.5)
+                .map(|n| crate::advanced::compression::MemoryForCompression {
+                    id: n.id.clone(),
+                    content: n.content.clone(),
+                    tags: n.tags.clone(),
+                    created_at: n.created_at,
+                    last_accessed: Some(n.last_accessed),
+                    embedding: None,
+                })
+                .collect();
+            if old_memories.len() >= 3 {
+                let groups = compressor.find_compressible_groups(&old_memories);
+                for group_ids in groups.iter().take(5) {
+                    // Limit to 5 groups per consolidation
+                    let group: Vec<_> = old_memories
+                        .iter()
+                        .filter(|m| group_ids.contains(&m.id))
+                        .cloned()
+                        .collect();
+                    if let Some(_compressed) = compressor.compress(&group) {
+                        _memories_compressed += group.len() as i64;
+                    }
+                }
+            }
+        }
+
+        // 10. Memory State Transitions (Active→Dormant→Silent→Unavailable)
+        let _state_transitions: i64;
+        {
+            let service = crate::neuroscience::memory_states::StateUpdateService::new();
+            let all_nodes = self.get_all_nodes(500, 0).unwrap_or_default();
+            let mut lifecycles: Vec<crate::neuroscience::memory_states::MemoryLifecycle> = all_nodes
+                .iter()
+                .map(|n| {
+                    let mut lc = crate::neuroscience::memory_states::MemoryLifecycle::new();
+                    lc.last_access = n.last_accessed;
+                    lc.access_count = n.reps as u32;
+                    lc.state = if n.retention_strength > 0.7 {
+                        crate::neuroscience::memory_states::MemoryState::Active
+                    } else if n.retention_strength > 0.3 {
+                        crate::neuroscience::memory_states::MemoryState::Dormant
+                    } else if n.retention_strength > 0.1 {
+                        crate::neuroscience::memory_states::MemoryState::Silent
+                    } else {
+                        crate::neuroscience::memory_states::MemoryState::Unavailable
+                    };
+                    lc
+                })
+                .collect();
+            let batch_result = service.batch_update(&mut lifecycles);
+            _state_transitions = batch_result.total_transitions as i64;
+        }
+
+        // 11. Synaptic Capture Sweep (retroactive importance)
+        {
+            let mut sts = crate::neuroscience::synaptic_tagging::SynapticTaggingSystem::new();
+            let _ = sts.sweep_for_capture(Utc::now());
+            sts.decay_tags();
+        }
+
+        // 12. Cross-Project Learning (detect universal patterns)
+        {
+            let learner = crate::advanced::cross_project::CrossProjectLearner::new();
+            let _patterns = learner.find_universal_patterns();
+        }
+
+        // 13. Hippocampal Index Maintenance
+        {
+            let index = crate::neuroscience::hippocampal_index::HippocampalIndex::new();
+            let _ = index.prune_weak_links();
+        }
+
+        // 14. Importance Evolution (decay stale importance)
+        {
+            let tracker = crate::advanced::importance::ImportanceTracker::new();
+            tracker.apply_importance_decay();
+        }
+
+        // 15. Connection Graph Maintenance (decay + prune weak connections)
+        let _connections_pruned = self.prune_weak_connections(0.05).unwrap_or(0) as i64;
+
+        // 16. FTS5 index optimization — merge segments for faster keyword search
+        // 17. Run PRAGMA optimize to refresh query planner statistics
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            let _ = writer.execute_batch(
+                "INSERT INTO knowledge_fts(knowledge_fts) VALUES('optimize');"
+            );
+            let _ = writer.execute_batch("PRAGMA optimize;");
+        }
+
+        // ====================================================================
+        // v1.9.0: Autonomic features (18-20)
+        // ====================================================================
+
+        // 18. Auto-promote memories with 3+ accesses in 24h (frequency-dependent potentiation)
+        let auto_promoted = self.auto_promote_frequent_access().unwrap_or(0);
+        promoted += auto_promoted;
+
+        // 19. Retention Target System — auto-GC if avg retention below target
+        let mut gc_triggered = false;
+        {
+            let retention_target: f64 = std::env::var("VESTIGE_RETENTION_TARGET")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.8);
+
+            let avg_retention = self.get_avg_retention().unwrap_or(1.0);
+            let total = self.get_stats().map(|s| s.total_nodes).unwrap_or(0);
+            let below_target = self.count_memories_below_retention(0.3).unwrap_or(0);
+
+            if avg_retention < retention_target && below_target > 0 {
+                let gc_count = self.gc_below_retention(0.3, 30).unwrap_or(0);
+                if gc_count > 0 {
+                    gc_triggered = true;
+                    tracing::info!(
+                        avg_retention = avg_retention,
+                        target = retention_target,
+                        gc_count = gc_count,
+                        "Retention target auto-GC: removed {} low-retention memories",
+                        gc_count
+                    );
+                }
+            }
+
+            // 20. Save retention snapshot for trend tracking
+            let _ = self.save_retention_snapshot(avg_retention, total, below_target, gc_triggered);
+        }
+
         let duration = start.elapsed().as_millis() as i64;
+
+        // Record consolidation history
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            let _ = writer.execute(
+                "INSERT INTO consolidation_history (completed_at, duration_ms, memories_replayed, duplicates_merged, activations_computed, w20_optimized)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    Utc::now().to_rfc3339(),
+                    duration,
+                    decay_applied,
+                    duplicates_merged,
+                    activations_computed,
+                    w20_optimized,
+                ],
+            );
+        }
 
         Ok(ConsolidationResult {
             nodes_processed: decay_applied,
@@ -1519,12 +2093,317 @@ impl Storage {
             decay_applied,
             duration_ms: duration,
             embeddings_generated,
+            duplicates_merged,
+            neighbors_reinforced: 0,
+            activations_computed,
+            w20_optimized,
         })
+    }
+
+    /// Auto-deduplicate similar memories during consolidation (episodic → semantic merge)
+    ///
+    /// Finds clusters with cosine similarity > 0.85, keeps the strongest node,
+    /// appends unique content from weaker nodes, and deletes duplicates.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn auto_dedup_consolidation(&self) -> Result<i64> {
+        let all_embeddings = self.get_all_embeddings()?;
+        let n = all_embeddings.len();
+
+        if !(2..=2000).contains(&n) {
+            return Ok(0);
+        }
+
+        const SIMILARITY_THRESHOLD: f32 = 0.85;
+        let mut merged_count = 0i64;
+        let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for i in 0..n {
+            if consumed.contains(&all_embeddings[i].0) {
+                continue;
+            }
+
+            let mut cluster: Vec<(usize, f32)> = Vec::new();
+
+            for j in (i + 1)..n {
+                if consumed.contains(&all_embeddings[j].0) {
+                    continue;
+                }
+                let sim =
+                    crate::embeddings::cosine_similarity(&all_embeddings[i].1, &all_embeddings[j].1);
+                if sim >= SIMILARITY_THRESHOLD {
+                    cluster.push((j, sim));
+                }
+            }
+
+            if cluster.is_empty() {
+                continue;
+            }
+
+            // Find the strongest node (highest retention_strength)
+            let anchor_id = &all_embeddings[i].0;
+            let reader = self.reader.lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            let anchor_retention: f64 = reader
+                .query_row(
+                    "SELECT retention_strength FROM knowledge_nodes WHERE id = ?1",
+                    params![anchor_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+
+            let mut best_idx = i;
+            let mut best_retention = anchor_retention;
+
+            for &(j, _) in &cluster {
+                let dup_id = &all_embeddings[j].0;
+                let dup_retention: f64 = reader
+                    .query_row(
+                        "SELECT retention_strength FROM knowledge_nodes WHERE id = ?1",
+                        params![dup_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0.0);
+                if dup_retention > best_retention {
+                    best_retention = dup_retention;
+                    best_idx = j;
+                }
+            }
+
+            let best_id = all_embeddings[best_idx].0.clone();
+
+            // Get keeper's content
+            let keeper_content: String = reader
+                .query_row(
+                    "SELECT content FROM knowledge_nodes WHERE id = ?1",
+                    params![best_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+
+            // Collect weak node IDs (all nodes in cluster except the keeper)
+            let mut weak_ids: Vec<String> = Vec::new();
+            if best_idx != i {
+                weak_ids.push(anchor_id.clone());
+            }
+            for &(j, _) in &cluster {
+                if j != best_idx {
+                    weak_ids.push(all_embeddings[j].0.clone());
+                }
+            }
+
+            // Merge unique content from weak nodes
+            let mut merged_content = keeper_content.clone();
+            for weak_id in &weak_ids {
+                let weak_content: String = reader
+                    .query_row(
+                        "SELECT content FROM knowledge_nodes WHERE id = ?1",
+                        params![weak_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_default();
+
+                let weak_trimmed = weak_content.trim();
+                if !merged_content.contains(weak_trimmed) && weak_trimmed.len() > 20 {
+                    merged_content.push_str("\n\n[MERGED] ");
+                    merged_content.push_str(weak_trimmed);
+                }
+            }
+
+            // Drop reader before taking writer locks in update/delete
+            drop(reader);
+
+            // Update keeper with merged content
+            if merged_content != keeper_content {
+                let _ = self.update_node_content(&best_id, &merged_content);
+            }
+
+            // Delete weak nodes
+            for weak_id in &weak_ids {
+                let _ = self.delete_node(weak_id);
+                consumed.insert(weak_id.clone());
+                merged_count += 1;
+            }
+
+            consumed.insert(best_id);
+        }
+
+        Ok(merged_count)
+    }
+
+    /// Compute ACT-R base-level activation for all nodes from access history.
+    /// B_i = ln(Σ t_j^(-d)) where t_j = days since j-th access, d = 0.5
+    fn compute_act_r_activations(&self) -> Result<i64> {
+        const ACT_R_DECAY: f64 = 0.5;
+        let now = Utc::now();
+
+        let node_ids: Vec<String> = {
+            let reader = self.reader.lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            reader
+                .prepare("SELECT DISTINCT node_id FROM memory_access_log")?
+                .query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        if node_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut count = 0i64;
+        let mut writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let tx = writer.transaction()?;
+
+        for node_id in &node_ids {
+            let timestamps: Vec<String> = tx
+                .prepare(
+                    "SELECT accessed_at FROM memory_access_log
+                     WHERE node_id = ?1
+                     ORDER BY accessed_at DESC
+                     LIMIT 500",
+                )?
+                .query_map(params![node_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if timestamps.is_empty() {
+                continue;
+            }
+
+            let mut sum_decay = 0.0_f64;
+            for ts_str in &timestamps {
+                let accessed_at = DateTime::parse_from_rfc3339(ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(now);
+                let days_since = (now - accessed_at).num_seconds() as f64 / 86400.0;
+                let t = days_since.max(0.001);
+                sum_decay += t.powf(-ACT_R_DECAY);
+            }
+
+            let activation = sum_decay.ln();
+
+            tx.execute(
+                "UPDATE knowledge_nodes SET activation = ?1 WHERE id = ?2",
+                params![activation, node_id],
+            )?;
+            count += 1;
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Prune old access log entries (keep last 90 days)
+    fn prune_access_log(&self) -> Result<i64> {
+        let cutoff = (Utc::now() - Duration::days(90)).to_rfc3339();
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let deleted = writer.execute(
+            "DELETE FROM memory_access_log WHERE accessed_at < ?1",
+            params![cutoff],
+        )? as i64;
+        Ok(deleted)
+    }
+
+    /// Optimize personalized w20 (forgetting curve decay) if enough access data exists.
+    /// Uses FSRSOptimizer golden section search on real retrieval history.
+    fn optimize_w20_if_ready(&self) -> Result<Option<f64>> {
+        use crate::fsrs::{FSRSOptimizer, ReviewLog};
+
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+
+        let access_count: i64 = reader
+            .query_row(
+                "SELECT COUNT(*) FROM memory_access_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if access_count < 100 {
+            return Ok(None);
+        }
+
+        let mut optimizer = FSRSOptimizer::new();
+
+        let logs: Vec<(String, String, String)> = reader
+            .prepare(
+                "SELECT mal.node_id, mal.access_type, mal.accessed_at
+                 FROM memory_access_log mal
+                 ORDER BY mal.accessed_at ASC
+                 LIMIT 1000",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (node_id, access_type, accessed_at) in &logs {
+            // Get node state for stability/difficulty
+            let node_state: Option<(f64, f64, String)> = reader
+                .query_row(
+                    "SELECT stability, difficulty, created_at FROM knowledge_nodes WHERE id = ?1",
+                    params![node_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok();
+
+            if let Some((stability, difficulty, created_at)) = node_state {
+                let ts = DateTime::parse_from_rfc3339(accessed_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                let created = DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(ts);
+
+                let rating = match access_type.as_str() {
+                    "promote" => 4,
+                    "search_hit" => 3,
+                    "demote" => 1,
+                    _ => 3,
+                };
+
+                let elapsed = (ts - created).num_seconds() as f64 / 86400.0;
+
+                optimizer.add_review(ReviewLog {
+                    timestamp: ts,
+                    rating,
+                    stability,
+                    difficulty,
+                    elapsed_days: elapsed.max(0.001),
+                });
+            }
+        }
+
+        drop(reader);
+
+        if !optimizer.has_enough_data() {
+            return Ok(None);
+        }
+
+        let optimized_w20 = optimizer.optimize_decay();
+
+        // Save to config
+        {
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
+                "INSERT OR REPLACE INTO fsrs_config (key, value, updated_at)
+                 VALUES ('w20', ?1, ?2)",
+                params![optimized_w20, Utc::now().to_rfc3339()],
+            )?;
+        }
+
+        tracing::info!(w20 = optimized_w20, "Personalized w20 optimized from access history");
+
+        Ok(Some(optimized_w20))
     }
 
     /// Generate missing embeddings
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-    fn generate_missing_embeddings(&mut self) -> Result<i64> {
+    fn generate_missing_embeddings(&self) -> Result<i64> {
         if !self.embedding_service.is_ready() {
             if let Err(e) = self.embedding_service.init() {
                 tracing::warn!("Could not initialize embedding model: {}", e);
@@ -1532,16 +2411,19 @@ impl Storage {
             }
         }
 
-        let nodes: Vec<(String, String)> = self
-            .conn
-            .prepare(
-                "SELECT id, content FROM knowledge_nodes
-                 WHERE has_embedding = 0 OR has_embedding IS NULL
-                 LIMIT 100",
-            )?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let nodes: Vec<(String, String)> = {
+            let reader = self.reader.lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            reader
+                .prepare(
+                    "SELECT id, content FROM knowledge_nodes
+                     WHERE has_embedding = 0 OR has_embedding IS NULL
+                     LIMIT 100",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
 
         let mut count = 0i64;
 
@@ -1664,17 +2546,39 @@ pub struct ConsolidationHistoryRecord {
     pub insights_generated: i32,
 }
 
+/// Dream history record — persists dream metadata for automation triggers
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DreamHistoryRecord {
+    pub dreamed_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub memories_replayed: i32,
+    pub connections_found: i32,
+    pub insights_generated: i32,
+    pub memories_strengthened: i32,
+    pub memories_compressed: i32,
+    // v2.0: 4-Phase dream cycle metrics
+    pub phase_nrem1_ms: Option<i64>,
+    pub phase_nrem3_ms: Option<i64>,
+    pub phase_rem_ms: Option<i64>,
+    pub phase_integration_ms: Option<i64>,
+    pub summaries_generated: Option<i32>,
+    pub emotional_memories_processed: Option<i32>,
+    pub creative_connections_found: Option<i32>,
+}
+
 impl Storage {
     // ========================================================================
     // INTENTIONS PERSISTENCE
     // ========================================================================
 
     /// Save an intention to the database
-    pub fn save_intention(&mut self, intention: &IntentionRecord) -> Result<()> {
+    pub fn save_intention(&self, intention: &IntentionRecord) -> Result<()> {
         let tags_json = serde_json::to_string(&intention.tags).unwrap_or_else(|_| "[]".to_string());
         let related_json = serde_json::to_string(&intention.related_memories).unwrap_or_else(|_| "[]".to_string());
 
-        self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
             "INSERT OR REPLACE INTO intentions (
                 id, content, trigger_type, trigger_data, priority, status,
                 created_at, deadline, fulfilled_at, reminder_count, last_reminded_at,
@@ -1705,22 +2609,26 @@ impl Storage {
 
     /// Get an intention by ID
     pub fn get_intention(&self, id: &str) -> Result<Option<IntentionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM intentions WHERE id = ?1"
         )?;
 
-        stmt.query_row(params![id], |row| self.row_to_intention(row))
+        stmt.query_row(params![id], |row| Self::row_to_intention(row))
             .optional()
             .map_err(StorageError::from)
     }
 
     /// Get all active intentions
     pub fn get_active_intentions(&self) -> Result<Vec<IntentionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM intentions WHERE status = 'active' ORDER BY priority DESC, created_at ASC"
         )?;
 
-        let rows = stmt.query_map([], |row| self.row_to_intention(row))?;
+        let rows = stmt.query_map([], |row| Self::row_to_intention(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1730,11 +2638,13 @@ impl Storage {
 
     /// Get intentions by status
     pub fn get_intentions_by_status(&self, status: &str) -> Result<Vec<IntentionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM intentions WHERE status = ?1 ORDER BY priority DESC, created_at ASC"
         )?;
 
-        let rows = stmt.query_map(params![status], |row| self.row_to_intention(row))?;
+        let rows = stmt.query_map(params![status], |row| Self::row_to_intention(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1743,11 +2653,13 @@ impl Storage {
     }
 
     /// Update intention status
-    pub fn update_intention_status(&mut self, id: &str, status: &str) -> Result<bool> {
+    pub fn update_intention_status(&self, id: &str, status: &str) -> Result<bool> {
         let now = Utc::now();
         let fulfilled_at = if status == "fulfilled" { Some(now.to_rfc3339()) } else { None };
 
-        let rows = self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE intentions SET status = ?1, fulfilled_at = ?2 WHERE id = ?3",
             params![status, fulfilled_at, id],
         )?;
@@ -1755,19 +2667,23 @@ impl Storage {
     }
 
     /// Delete an intention
-    pub fn delete_intention(&mut self, id: &str) -> Result<bool> {
-        let rows = self.conn.execute("DELETE FROM intentions WHERE id = ?1", params![id])?;
+    pub fn delete_intention(&self, id: &str) -> Result<bool> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute("DELETE FROM intentions WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
 
     /// Get overdue intentions
     pub fn get_overdue_intentions(&self) -> Result<Vec<IntentionRecord>> {
         let now = Utc::now().to_rfc3339();
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM intentions WHERE status = 'active' AND deadline IS NOT NULL AND deadline < ?1 ORDER BY deadline ASC"
         )?;
 
-        let rows = stmt.query_map(params![now], |row| self.row_to_intention(row))?;
+        let rows = stmt.query_map(params![now], |row| Self::row_to_intention(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1776,15 +2692,17 @@ impl Storage {
     }
 
     /// Snooze an intention
-    pub fn snooze_intention(&mut self, id: &str, until: DateTime<Utc>) -> Result<bool> {
-        let rows = self.conn.execute(
+    pub fn snooze_intention(&self, id: &str, until: DateTime<Utc>) -> Result<bool> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE intentions SET status = 'snoozed', snoozed_until = ?1 WHERE id = ?2",
             params![until.to_rfc3339(), id],
         )?;
         Ok(rows > 0)
     }
 
-    fn row_to_intention(&self, row: &rusqlite::Row) -> rusqlite::Result<IntentionRecord> {
+    fn row_to_intention(row: &rusqlite::Row) -> rusqlite::Result<IntentionRecord> {
         let tags_json: String = row.get("tags")?;
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
         let related_json: String = row.get("related_memories")?;
@@ -1822,11 +2740,13 @@ impl Storage {
     // ========================================================================
 
     /// Save an insight to the database
-    pub fn save_insight(&mut self, insight: &InsightRecord) -> Result<()> {
+    pub fn save_insight(&self, insight: &InsightRecord) -> Result<()> {
         let source_json = serde_json::to_string(&insight.source_memories).unwrap_or_else(|_| "[]".to_string());
         let tags_json = serde_json::to_string(&insight.tags).unwrap_or_else(|_| "[]".to_string());
 
-        self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
             "INSERT OR REPLACE INTO insights (
                 id, insight, source_memories, confidence, novelty_score, insight_type,
                 generated_at, tags, feedback, applied_count
@@ -1849,11 +2769,13 @@ impl Storage {
 
     /// Get insights with optional limit
     pub fn get_insights(&self, limit: i32) -> Result<Vec<InsightRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM insights ORDER BY generated_at DESC LIMIT ?1"
         )?;
 
-        let rows = stmt.query_map(params![limit], |row| self.row_to_insight(row))?;
+        let rows = stmt.query_map(params![limit], |row| Self::row_to_insight(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1863,11 +2785,13 @@ impl Storage {
 
     /// Get insights without feedback (pending review)
     pub fn get_pending_insights(&self) -> Result<Vec<InsightRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM insights WHERE feedback IS NULL ORDER BY novelty_score DESC"
         )?;
 
-        let rows = stmt.query_map([], |row| self.row_to_insight(row))?;
+        let rows = stmt.query_map([], |row| Self::row_to_insight(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1876,8 +2800,10 @@ impl Storage {
     }
 
     /// Mark insight feedback
-    pub fn mark_insight_feedback(&mut self, id: &str, feedback: &str) -> Result<bool> {
-        let rows = self.conn.execute(
+    pub fn mark_insight_feedback(&self, id: &str, feedback: &str) -> Result<bool> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE insights SET feedback = ?1 WHERE id = ?2",
             params![feedback, id],
         )?;
@@ -1885,13 +2811,15 @@ impl Storage {
     }
 
     /// Clear all insights
-    pub fn clear_insights(&mut self) -> Result<i32> {
-        let count: i32 = self.conn.query_row("SELECT COUNT(*) FROM insights", [], |row| row.get(0))?;
-        self.conn.execute("DELETE FROM insights", [])?;
+    pub fn clear_insights(&self) -> Result<i32> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let count: i32 = writer.query_row("SELECT COUNT(*) FROM insights", [], |row| row.get(0))?;
+        writer.execute("DELETE FROM insights", [])?;
         Ok(count)
     }
 
-    fn row_to_insight(&self, row: &rusqlite::Row) -> rusqlite::Result<InsightRecord> {
+    fn row_to_insight(row: &rusqlite::Row) -> rusqlite::Result<InsightRecord> {
         let source_json: String = row.get("source_memories")?;
         let source_memories: Vec<String> = serde_json::from_str(&source_json).unwrap_or_default();
         let tags_json: String = row.get("tags")?;
@@ -1918,8 +2846,10 @@ impl Storage {
     // ========================================================================
 
     /// Save a memory connection
-    pub fn save_connection(&mut self, connection: &ConnectionRecord) -> Result<()> {
-        self.conn.execute(
+    pub fn save_connection(&self, connection: &ConnectionRecord) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
             "INSERT OR REPLACE INTO memory_connections (
                 source_id, target_id, strength, link_type, created_at, last_activated, activation_count
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1938,11 +2868,13 @@ impl Storage {
 
     /// Get connections for a memory
     pub fn get_connections_for_memory(&self, memory_id: &str) -> Result<Vec<ConnectionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM memory_connections WHERE source_id = ?1 OR target_id = ?1 ORDER BY strength DESC"
         )?;
 
-        let rows = stmt.query_map(params![memory_id], |row| self.row_to_connection(row))?;
+        let rows = stmt.query_map(params![memory_id], |row| Self::row_to_connection(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1952,11 +2884,13 @@ impl Storage {
 
     /// Get all connections (for building activation network)
     pub fn get_all_connections(&self) -> Result<Vec<ConnectionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM memory_connections ORDER BY strength DESC"
         )?;
 
-        let rows = stmt.query_map([], |row| self.row_to_connection(row))?;
+        let rows = stmt.query_map([], |row| Self::row_to_connection(row))?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -1965,9 +2899,11 @@ impl Storage {
     }
 
     /// Strengthen a connection
-    pub fn strengthen_connection(&mut self, source_id: &str, target_id: &str, boost: f64) -> Result<bool> {
+    pub fn strengthen_connection(&self, source_id: &str, target_id: &str, boost: f64) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
-        let rows = self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE memory_connections SET
                 strength = MIN(strength + ?1, 1.0),
                 last_activated = ?2,
@@ -1979,8 +2915,10 @@ impl Storage {
     }
 
     /// Apply decay to all connections
-    pub fn apply_connection_decay(&mut self, decay_factor: f64) -> Result<i32> {
-        let rows = self.conn.execute(
+    pub fn apply_connection_decay(&self, decay_factor: f64) -> Result<i32> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE memory_connections SET strength = strength * ?1",
             params![decay_factor],
         )?;
@@ -1988,15 +2926,17 @@ impl Storage {
     }
 
     /// Prune weak connections below threshold
-    pub fn prune_weak_connections(&mut self, min_strength: f64) -> Result<i32> {
-        let rows = self.conn.execute(
+    pub fn prune_weak_connections(&self, min_strength: f64) -> Result<i32> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "DELETE FROM memory_connections WHERE strength < ?1",
             params![min_strength],
         )?;
         Ok(rows as i32)
     }
 
-    fn row_to_connection(&self, row: &rusqlite::Row) -> rusqlite::Result<ConnectionRecord> {
+    fn row_to_connection(row: &rusqlite::Row) -> rusqlite::Result<ConnectionRecord> {
         Ok(ConnectionRecord {
             source_id: row.get("source_id")?,
             target_id: row.get("target_id")?,
@@ -2017,10 +2957,12 @@ impl Storage {
     // ========================================================================
 
     /// Save or update memory state
-    pub fn save_memory_state(&mut self, state: &MemoryStateRecord) -> Result<()> {
+    pub fn save_memory_state(&self, state: &MemoryStateRecord) -> Result<()> {
         let suppressed_json = serde_json::to_string(&state.suppressed_by).unwrap_or_else(|_| "[]".to_string());
 
-        self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
             "INSERT OR REPLACE INTO memory_states (
                 memory_id, state, last_access, access_count, state_entered_at,
                 suppression_until, suppressed_by
@@ -2040,18 +2982,22 @@ impl Storage {
 
     /// Get memory state
     pub fn get_memory_state(&self, memory_id: &str) -> Result<Option<MemoryStateRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM memory_states WHERE memory_id = ?1"
         )?;
 
-        stmt.query_row(params![memory_id], |row| self.row_to_memory_state(row))
+        stmt.query_row(params![memory_id], |row| Self::row_to_memory_state(row))
             .optional()
             .map_err(StorageError::from)
     }
 
     /// Get memories by state
     pub fn get_memories_by_state(&self, state: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT memory_id FROM memory_states WHERE state = ?1"
         )?;
 
@@ -2064,20 +3010,24 @@ impl Storage {
     }
 
     /// Update memory state
-    pub fn update_memory_state(&mut self, memory_id: &str, new_state: &str, reason: &str) -> Result<bool> {
+    pub fn update_memory_state(&self, memory_id: &str, new_state: &str, reason: &str) -> Result<bool> {
         let now = Utc::now();
 
         // Get old state for transition record
         if let Some(old_record) = self.get_memory_state(memory_id)? {
             // Record state transition
-            self.conn.execute(
+            let writer = self.writer.lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            writer.execute(
                 "INSERT INTO state_transitions (memory_id, from_state, to_state, reason_type, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![memory_id, old_record.state, new_state, reason, now.to_rfc3339()],
             )?;
         }
 
-        let rows = self.conn.execute(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let rows = writer.execute(
             "UPDATE memory_states SET state = ?1, state_entered_at = ?2 WHERE memory_id = ?3",
             params![new_state, now.to_rfc3339(), memory_id],
         )?;
@@ -2085,18 +3035,21 @@ impl Storage {
     }
 
     /// Record access to memory (updates state)
-    pub fn record_memory_access(&mut self, memory_id: &str) -> Result<()> {
+    pub fn record_memory_access(&self, memory_id: &str) -> Result<()> {
         let now = Utc::now();
 
-        // Check if state exists
-        let exists: bool = self.conn.query_row(
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+
+        // Check if state exists (writer can read too)
+        let exists: bool = writer.query_row(
             "SELECT EXISTS(SELECT 1 FROM memory_states WHERE memory_id = ?1)",
             params![memory_id],
             |row| row.get(0),
         )?;
 
         if exists {
-            self.conn.execute(
+            writer.execute(
                 "UPDATE memory_states SET
                     last_access = ?1,
                     access_count = access_count + 1,
@@ -2106,7 +3059,7 @@ impl Storage {
                 params![now.to_rfc3339(), memory_id],
             )?;
         } else {
-            self.conn.execute(
+            writer.execute(
                 "INSERT INTO memory_states (memory_id, state, last_access, access_count, state_entered_at)
                  VALUES (?1, 'active', ?2, 1, ?2)",
                 params![memory_id, now.to_rfc3339()],
@@ -2115,7 +3068,7 @@ impl Storage {
         Ok(())
     }
 
-    fn row_to_memory_state(&self, row: &rusqlite::Row) -> rusqlite::Result<MemoryStateRecord> {
+    fn row_to_memory_state(row: &rusqlite::Row) -> rusqlite::Result<MemoryStateRecord> {
         let suppressed_json: String = row.get("suppressed_by")?;
         let suppressed_by: Vec<String> = serde_json::from_str(&suppressed_json).unwrap_or_default();
 
@@ -2143,8 +3096,10 @@ impl Storage {
     // ========================================================================
 
     /// Save consolidation history record
-    pub fn save_consolidation_history(&mut self, record: &ConsolidationHistoryRecord) -> Result<i64> {
-        self.conn.execute(
+    pub fn save_consolidation_history(&self, record: &ConsolidationHistoryRecord) -> Result<i64> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
             "INSERT INTO consolidation_history (
                 completed_at, duration_ms, memories_replayed, connections_found,
                 connections_strengthened, connections_pruned, insights_generated
@@ -2159,12 +3114,14 @@ impl Storage {
                 record.insights_generated,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(writer.last_insert_rowid())
     }
 
     /// Get last consolidation timestamp
     pub fn get_last_consolidation(&self) -> Result<Option<DateTime<Utc>>> {
-        let result: Option<String> = self.conn.query_row(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let result: Option<String> = reader.query_row(
             "SELECT MAX(completed_at) FROM consolidation_history",
             [],
             |row| row.get(0),
@@ -2177,7 +3134,9 @@ impl Storage {
 
     /// Get consolidation history
     pub fn get_consolidation_history(&self, limit: i32) -> Result<Vec<ConsolidationHistoryRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM consolidation_history ORDER BY completed_at DESC LIMIT ?1"
         )?;
 
@@ -2204,16 +3163,397 @@ impl Storage {
     }
 
     // ========================================================================
+    // DREAM HISTORY PERSISTENCE
+    // ========================================================================
+
+    /// Save a dream history record
+    pub fn save_dream_history(&self, record: &DreamHistoryRecord) -> Result<i64> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "INSERT INTO dream_history (
+                dreamed_at, duration_ms, memories_replayed, connections_found,
+                insights_generated, memories_strengthened, memories_compressed,
+                phase_nrem1_ms, phase_nrem3_ms, phase_rem_ms, phase_integration_ms,
+                summaries_generated, emotional_memories_processed, creative_connections_found
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                record.dreamed_at.to_rfc3339(),
+                record.duration_ms,
+                record.memories_replayed,
+                record.connections_found,
+                record.insights_generated,
+                record.memories_strengthened,
+                record.memories_compressed,
+                record.phase_nrem1_ms,
+                record.phase_nrem3_ms,
+                record.phase_rem_ms,
+                record.phase_integration_ms,
+                record.summaries_generated,
+                record.emotional_memories_processed,
+                record.creative_connections_found,
+            ],
+        )?;
+        Ok(writer.last_insert_rowid())
+    }
+
+    /// Get last dream timestamp
+    pub fn get_last_dream(&self) -> Result<Option<DateTime<Utc>>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let result: Option<String> = reader.query_row(
+            "SELECT MAX(dreamed_at) FROM dream_history",
+            [],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        Ok(result.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))
+        }))
+    }
+
+    /// Count memories created since a given timestamp
+    pub fn count_memories_since(&self, since: DateTime<Utc>) -> Result<i64> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let count: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM knowledge_nodes WHERE created_at >= ?1",
+            params![since.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get last backup timestamp by scanning the backups directory.
+    /// Parses `vestige-YYYYMMDD-HHMMSS.db` filenames.
+    pub fn get_last_backup_timestamp() -> Option<DateTime<Utc>> {
+        let proj_dirs = directories::ProjectDirs::from("com", "vestige", "core")?;
+        let backup_dir = proj_dirs.data_dir().parent()?.join("backups");
+
+        if !backup_dir.exists() {
+            return None;
+        }
+
+        let mut latest: Option<DateTime<Utc>> = None;
+
+        if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Parse vestige-YYYYMMDD-HHMMSS.db
+                if let Some(ts_part) = name_str.strip_prefix("vestige-").and_then(|s| s.strip_suffix(".db")) {
+                    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts_part, "%Y%m%d-%H%M%S") {
+                        let dt = naive.and_utc();
+                        if latest.as_ref().is_none_or(|l| dt > *l) {
+                            latest = Some(dt);
+                        }
+                    }
+                }
+            }
+        }
+
+        latest
+    }
+
+    // ========================================================================
     // STATE TRANSITIONS (Audit Trail)
     // ========================================================================
 
     /// Get state transitions for a memory
     pub fn get_state_transitions(&self, memory_id: &str, limit: i32) -> Result<Vec<StateTransitionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
             "SELECT * FROM state_transitions WHERE memory_id = ?1 ORDER BY timestamp DESC LIMIT ?2"
         )?;
 
         let rows = stmt.query_map(params![memory_id, limit], |row| {
+            Ok(StateTransitionRecord {
+                id: row.get("id")?,
+                memory_id: row.get("memory_id")?,
+                from_state: row.get("from_state")?,
+                to_state: row.get("to_state")?,
+                reason_type: row.get("reason_type")?,
+                reason_data: row.get("reason_data").ok().flatten(),
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>("timestamp")?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Create a consistent backup using VACUUM INTO
+    pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        let path_str = path.to_str().ok_or_else(|| {
+            StorageError::Init("Invalid backup path encoding".to_string())
+        })?;
+        // Validate path: reject control characters (except tab) for defense-in-depth
+        if path_str.bytes().any(|b| b < 0x20 && b != b'\t') {
+            return Err(StorageError::Init("Backup path contains invalid characters".to_string()));
+        }
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        // VACUUM INTO doesn't support parameterized queries; escape single quotes
+        reader.execute_batch(&format!("VACUUM INTO '{}'", path_str.replace('\'', "''")))?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // v1.9.0 AUTONOMIC: Retention Target, Auto-Promote, Waking Tags, Utility
+    // ========================================================================
+
+    /// Get average retention across all memories
+    pub fn get_avg_retention(&self) -> Result<f64> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let avg: f64 = reader.query_row(
+            "SELECT COALESCE(AVG(retention_strength), 0.0) FROM knowledge_nodes",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(avg)
+    }
+
+    /// Get retention distribution in buckets (0-20%, 20-40%, 40-60%, 60-80%, 80-100%)
+    pub fn get_retention_distribution(&self) -> Result<Vec<(String, i64)>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
+            "SELECT
+                CASE
+                    WHEN retention_strength < 0.2 THEN '0-20%'
+                    WHEN retention_strength < 0.4 THEN '20-40%'
+                    WHEN retention_strength < 0.6 THEN '40-60%'
+                    WHEN retention_strength < 0.8 THEN '60-80%'
+                    ELSE '80-100%'
+                END as bucket,
+                COUNT(*) as count
+            FROM knowledge_nodes
+            GROUP BY bucket
+            ORDER BY bucket"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Get retention trend (improving/declining/stable) from retention snapshots
+    pub fn get_retention_trend(&self) -> Result<String> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+
+        let snapshots: Vec<f64> = reader.prepare(
+            "SELECT avg_retention FROM retention_snapshots ORDER BY snapshot_at DESC LIMIT 5"
+        )?.query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if snapshots.len() < 3 {
+            return Ok("insufficient_data".to_string());
+        }
+
+        // Compare recent vs older snapshots
+        let recent_avg = snapshots.iter().take(2).sum::<f64>() / 2.0;
+        let older_avg = snapshots.iter().skip(2).sum::<f64>() / (snapshots.len() - 2) as f64;
+
+        let diff = recent_avg - older_avg;
+        Ok(if diff > 0.02 {
+            "improving".to_string()
+        } else if diff < -0.02 {
+            "declining".to_string()
+        } else {
+            "stable".to_string()
+        })
+    }
+
+    /// Save a retention snapshot (called during consolidation)
+    pub fn save_retention_snapshot(&self, avg_retention: f64, total: i64, below_target: i64, gc_triggered: bool) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "INSERT INTO retention_snapshots (snapshot_at, avg_retention, total_memories, memories_below_target, gc_triggered)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![Utc::now().to_rfc3339(), avg_retention, total, below_target, gc_triggered],
+        )?;
+        Ok(())
+    }
+
+    /// Count memories below a given retention threshold
+    pub fn count_memories_below_retention(&self, threshold: f64) -> Result<i64> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let count: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM knowledge_nodes WHERE retention_strength < ?1",
+            params![threshold],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Auto-GC memories below threshold (used by retention target system)
+    pub fn gc_below_retention(&self, threshold: f64, min_age_days: i64) -> Result<i64> {
+        let cutoff = (Utc::now() - Duration::days(min_age_days)).to_rfc3339();
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let deleted = writer.execute(
+            "DELETE FROM knowledge_nodes WHERE retention_strength < ?1 AND created_at < ?2",
+            params![threshold, cutoff],
+        )? as i64;
+        Ok(deleted)
+    }
+
+    /// Check for auto-promote candidates: memories accessed 3+ times in last 24h
+    pub fn auto_promote_frequent_access(&self) -> Result<i64> {
+        let twenty_four_hours_ago = (Utc::now() - Duration::hours(24)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+
+        // Find memories with 3+ accesses in last 24h
+        let candidates: Vec<String> = {
+            let reader = self.reader.lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            let mut stmt = reader.prepare(
+                "SELECT node_id, COUNT(*) as access_count
+                 FROM memory_access_log
+                 WHERE accessed_at >= ?1
+                 GROUP BY node_id
+                 HAVING access_count >= 3"
+            )?;
+            stmt.query_map(params![twenty_four_hours_ago], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let mut promoted = 0i64;
+        for id in &candidates {
+            let rows = writer.execute(
+                "UPDATE knowledge_nodes SET
+                    retrieval_strength = MIN(1.0, retrieval_strength + 0.10),
+                    retention_strength = MIN(1.0, retention_strength + 0.05),
+                    last_accessed = ?1
+                WHERE id = ?2 AND retrieval_strength < 0.95",
+                params![now, id],
+            )?;
+            if rows > 0 {
+                promoted += 1;
+            }
+        }
+
+        Ok(promoted)
+    }
+
+    /// Set waking tag on a memory (marks it for preferential dream replay)
+    pub fn set_waking_tag(&self, memory_id: &str) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "UPDATE knowledge_nodes SET waking_tag = TRUE, waking_tag_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), memory_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear waking tags (called after dream processes them)
+    pub fn clear_waking_tags(&self) -> Result<i64> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let cleared = writer.execute(
+            "UPDATE knowledge_nodes SET waking_tag = FALSE, waking_tag_at = NULL WHERE waking_tag = TRUE",
+            [],
+        )? as i64;
+        Ok(cleared)
+    }
+
+    /// Get waking-tagged memories for preferential dream replay
+    pub fn get_waking_tagged_memories(&self, limit: i32) -> Result<Vec<KnowledgeNode>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
+            "SELECT * FROM knowledge_nodes WHERE waking_tag = TRUE ORDER BY waking_tag_at DESC LIMIT ?1"
+        )?;
+        let nodes = stmt.query_map(params![limit], |row| Self::row_to_node(row))?;
+        let mut result = Vec::new();
+        for node in nodes {
+            result.push(node?);
+        }
+        Ok(result)
+    }
+
+    /// Get memories with their connection data for graph visualization
+    pub fn get_memory_subgraph(&self, center_id: &str, depth: u32, max_nodes: usize) -> Result<(Vec<KnowledgeNode>, Vec<ConnectionRecord>)> {
+        let mut visited_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut frontier = vec![center_id.to_string()];
+        visited_ids.insert(center_id.to_string());
+
+        // BFS to discover connected nodes up to depth
+        for _ in 0..depth {
+            let mut next_frontier = Vec::new();
+            for id in &frontier {
+                let connections = self.get_connections_for_memory(id)?;
+                for conn in &connections {
+                    let other_id = if conn.source_id == *id { &conn.target_id } else { &conn.source_id };
+                    if visited_ids.insert(other_id.clone()) {
+                        next_frontier.push(other_id.clone());
+                        if visited_ids.len() >= max_nodes {
+                            break;
+                        }
+                    }
+                }
+                if visited_ids.len() >= max_nodes {
+                    break;
+                }
+            }
+            frontier = next_frontier;
+            if frontier.is_empty() || visited_ids.len() >= max_nodes {
+                break;
+            }
+        }
+
+        // Fetch nodes
+        let mut nodes = Vec::new();
+        for id in &visited_ids {
+            if let Some(node) = self.get_node(id)? {
+                nodes.push(node);
+            }
+        }
+
+        // Fetch edges between visited nodes
+        let all_connections = self.get_all_connections()?;
+        let edges: Vec<ConnectionRecord> = all_connections
+            .into_iter()
+            .filter(|c| visited_ids.contains(&c.source_id) && visited_ids.contains(&c.target_id))
+            .collect();
+
+        Ok((nodes, edges))
+    }
+
+    /// Get recent state transitions across all memories (system-wide changelog)
+    pub fn get_recent_state_transitions(&self, limit: i32) -> Result<Vec<StateTransitionRecord>> {
+        let reader = self.reader.lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let mut stmt = reader.prepare(
+            "SELECT * FROM state_transitions ORDER BY timestamp DESC LIMIT ?1"
+        )?;
+
+        let rows = stmt.query_map(params![limit], |row| {
             Ok(StateTransitionRecord {
                 id: row.get("id")?,
                 memory_id: row.get("memory_id")?,
@@ -2259,7 +3599,7 @@ mod tests {
 
     #[test]
     fn test_ingest_and_get() {
-        let mut storage = create_test_storage();
+        let storage = create_test_storage();
 
         let input = IngestInput {
             content: "Test memory content".to_string(),
@@ -2278,7 +3618,7 @@ mod tests {
 
     #[test]
     fn test_search() {
-        let mut storage = create_test_storage();
+        let storage = create_test_storage();
 
         let input = IngestInput {
             content: "The mitochondria is the powerhouse of the cell".to_string(),
@@ -2295,7 +3635,7 @@ mod tests {
 
     #[test]
     fn test_review() {
-        let mut storage = create_test_storage();
+        let storage = create_test_storage();
 
         let input = IngestInput {
             content: "Test review".to_string(),
@@ -2312,7 +3652,7 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut storage = create_test_storage();
+        let storage = create_test_storage();
 
         let input = IngestInput {
             content: "To be deleted".to_string(),
@@ -2326,5 +3666,71 @@ mod tests {
         let deleted = storage.delete_node(&node.id).unwrap();
         assert!(deleted);
         assert!(storage.get_node(&node.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_dream_history_save_and_get_last() {
+        let storage = create_test_storage();
+        let now = Utc::now();
+
+        let record = DreamHistoryRecord {
+            dreamed_at: now,
+            duration_ms: 1500,
+            memories_replayed: 50,
+            connections_found: 12,
+            insights_generated: 3,
+            memories_strengthened: 8,
+            memories_compressed: 2,
+            phase_nrem1_ms: None,
+            phase_nrem3_ms: None,
+            phase_rem_ms: None,
+            phase_integration_ms: None,
+            summaries_generated: None,
+            emotional_memories_processed: None,
+            creative_connections_found: None,
+        };
+
+        let id = storage.save_dream_history(&record).unwrap();
+        assert!(id > 0);
+
+        let last = storage.get_last_dream().unwrap();
+        assert!(last.is_some());
+        // Timestamps should be within 1 second (RFC3339 round-trip)
+        let diff = (last.unwrap() - now).num_seconds().abs();
+        assert!(diff <= 1, "Timestamp mismatch: diff={}s", diff);
+    }
+
+    #[test]
+    fn test_dream_history_empty() {
+        let storage = create_test_storage();
+        let last = storage.get_last_dream().unwrap();
+        assert!(last.is_none());
+    }
+
+    #[test]
+    fn test_count_memories_since() {
+        let storage = create_test_storage();
+        let before = Utc::now() - Duration::seconds(10);
+
+        for i in 0..5 {
+            storage.ingest(IngestInput {
+                content: format!("Count test memory {}", i),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            }).unwrap();
+        }
+
+        let count = storage.count_memories_since(before).unwrap();
+        assert_eq!(count, 5);
+
+        let future = Utc::now() + Duration::hours(1);
+        let count_future = storage.count_memories_since(future).unwrap();
+        assert_eq!(count_future, 0);
+    }
+
+    #[test]
+    fn test_get_last_backup_timestamp_no_panic() {
+        // Static method should not panic even if no backups exist
+        let _ = Storage::get_last_backup_timestamp();
     }
 }

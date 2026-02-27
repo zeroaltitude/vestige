@@ -56,8 +56,8 @@ impl NodeType {
         }
     }
 
-    /// Parse from string
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from string name
+    pub fn parse_name(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "fact" => NodeType::Fact,
             "concept" => NodeType::Concept,
@@ -148,6 +148,30 @@ pub struct KnowledgeNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<DateTime<Utc>>,
 
+    // ========== Utility Tracking (MemRL v1.9.0) ==========
+    /// Utility score = times_useful / times_retrieved (0.0 to 1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utility_score: Option<f64>,
+    /// Number of times this memory was retrieved in search
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub times_retrieved: Option<i32>,
+    /// Number of times this memory was subsequently useful
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub times_useful: Option<i32>,
+
+    // ========== Emotional Memory (v2.0.0) ==========
+    /// Emotional valence: -1.0 (negative) to 1.0 (positive)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emotional_valence: Option<f64>,
+    /// Flashbulb memory flag: ultra-high-fidelity encoding
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flashbulb: Option<bool>,
+
+    // ========== Temporal Hierarchy (v2.0.0) ==========
+    /// Temporal level for summary nodes: None=leaf, "daily"/"weekly"/"monthly"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temporal_level: Option<String>,
+
     // ========== Semantic Embedding ==========
     /// Whether this node has an embedding vector
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,6 +205,12 @@ impl Default for KnowledgeNode {
             tags: vec![],
             valid_from: None,
             valid_until: None,
+            utility_score: None,
+            times_retrieved: None,
+            times_useful: None,
+            emotional_valence: None,
+            flashbulb: None,
+            temporal_level: None,
             has_embedding: None,
             embedding_model: None,
         }
@@ -215,7 +245,7 @@ impl KnowledgeNode {
 
     /// Get the parsed node type
     pub fn get_node_type(&self) -> NodeType {
-        NodeType::from_str(&self.node_type)
+        NodeType::parse_name(&self.node_type)
     }
 }
 
@@ -330,7 +360,7 @@ mod tests {
             NodeType::Event,
             NodeType::Code,
         ] {
-            assert_eq!(NodeType::from_str(node_type.as_str()), node_type);
+            assert_eq!(NodeType::parse_name(node_type.as_str()), node_type);
         }
     }
 

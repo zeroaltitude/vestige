@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Knowledge Tools (Deprecated - use memory_unified instead)
 //!
 //! Get and delete specific knowledge nodes.
@@ -6,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::Storage;
 
@@ -45,7 +43,7 @@ struct KnowledgeArgs {
 }
 
 pub async fn execute_get(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: KnowledgeArgs = match args {
@@ -56,7 +54,6 @@ pub async fn execute_get(
     // Validate UUID
     uuid::Uuid::parse_str(&args.id).map_err(|_| "Invalid node ID format".to_string())?;
 
-    let storage = storage.lock().await;
     let node = storage.get_node(&args.id).map_err(|e| e.to_string())?;
 
     match node {
@@ -94,7 +91,7 @@ pub async fn execute_get(
 }
 
 pub async fn execute_delete(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: KnowledgeArgs = match args {
@@ -105,7 +102,6 @@ pub async fn execute_delete(
     // Validate UUID
     uuid::Uuid::parse_str(&args.id).map_err(|_| "Invalid node ID format".to_string())?;
 
-    let mut storage = storage.lock().await;
     let deleted = storage.delete_node(&args.id).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({

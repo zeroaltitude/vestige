@@ -84,6 +84,9 @@ const DEFAULT_ACTIVITY_WINDOW_SECS: i64 = 300;
 /// Minimum idle time before consolidation can run (30 minutes)
 const MIN_IDLE_TIME_FOR_CONSOLIDATION_MINS: i64 = 30;
 
+/// Minimum brief idle time for force/mini consolidation triggers (5 minutes)
+const MIN_BRIEF_IDLE_MINS: i64 = 5;
+
 /// Connection strength decay factor
 const CONNECTION_DECAY_FACTOR: f64 = 0.95;
 
@@ -252,20 +255,42 @@ impl ConsolidationScheduler {
 
     /// Check if consolidation should run
     ///
-    /// Returns true if:
-    /// - Auto consolidation is enabled
-    /// - Sufficient time has passed since last consolidation
-    /// - System is currently idle
+    /// v1.9.0: Improved scheduler with multiple trigger conditions:
+    /// - Full consolidation: >6h stale AND >10 new memories since last
+    /// - Mini-consolidation (decay only): >2h if active
+    /// - System idle AND interval passed
     pub fn should_consolidate(&self) -> bool {
         if !self.auto_enabled {
             return false;
         }
 
         let time_since_last = Utc::now() - self.last_consolidation;
+
+        // Trigger 1: Standard interval + idle check
         let interval_passed = time_since_last >= self.consolidation_interval;
         let is_idle = self.activity_tracker.is_idle();
+        if interval_passed && is_idle {
+            return true;
+        }
 
-        interval_passed && is_idle
+        // Brief idle: no activity in the last 5 minutes (shorter than full idle)
+        let briefly_idle = self
+            .activity_tracker
+            .time_since_last_activity()
+            .map(|d| d >= Duration::minutes(MIN_BRIEF_IDLE_MINS))
+            .unwrap_or(true); // No activity ever = idle
+
+        // Trigger 2: >6h stale — force during any idle period (even brief)
+        if time_since_last >= Duration::hours(6) && briefly_idle {
+            return true;
+        }
+
+        // Trigger 3: Mini-consolidation every 2h during brief lulls (5-30 min idle)
+        if time_since_last >= Duration::hours(2) && briefly_idle && !is_idle {
+            return true;
+        }
+
+        false
     }
 
     /// Force check if consolidation should run (ignoring idle check)
@@ -1591,9 +1616,7 @@ impl MemoryDreamer {
         let word_novelty = (novel_words as f64 / total_words as f64) * 0.5;
 
         // Boost novelty if connecting multiple sources
-        let source_bonus = ((source_memories.len() as f64 - 2.0) * 0.1)
-            .max(0.0)
-            .min(0.3);
+        let source_bonus = ((source_memories.len() as f64 - 2.0) * 0.1).clamp(0.0, 0.3);
 
         (word_novelty + source_bonus + 0.2).min(1.0)
     }
@@ -1722,12 +1745,16 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     (dot / (mag_a * mag_b)) as f64
 }
 
-/// Truncate string to max length
+/// Truncate string to max length (UTF-8 safe)
 fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
     } else {
-        &s[..max_len]
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 }
 
@@ -1907,7 +1934,8 @@ mod tests {
 
         // Should have completed all stages
         assert!(report.stage1_replay.is_some());
-        assert!(report.duration_ms >= 0);
+        // duration_ms is u64, so just verify the field is accessible
+        let _ = report.duration_ms;
         assert!(report.completed_at <= Utc::now());
     }
 

@@ -138,12 +138,17 @@ pub use fsrs::{
 
 // Storage layer
 pub use storage::{
-    ConsolidationHistoryRecord, InsightRecord, IntentionRecord, Result, SmartIngestResult, Storage,
-    StorageError,
+    ConnectionRecord, ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord,
+    IntentionRecord, Result, SmartIngestResult, StateTransitionRecord, Storage, StorageError,
 };
 
 // Consolidation (sleep-inspired memory processing)
 pub use consolidation::SleepConsolidation;
+pub use consolidation::{
+    DreamEngine, DreamPhase, FourPhaseDreamResult, PhaseResult,
+    TriagedMemory, TriageCategory, CreativeConnection, CreativeConnectionType,
+    DreamInsight,
+};
 
 // Advanced features (bleeding edge 2026)
 pub use advanced::{
@@ -175,6 +180,8 @@ pub use advanced::{
     DreamConfig,
     // DreamMemory - input type for dreaming
     DreamMemory,
+    DiscoveredConnection,
+    DiscoveredConnectionType,
     DreamResult,
     EmbeddingStrategy,
     ImportanceDecayConfig,
@@ -367,6 +374,11 @@ pub use neuroscience::{
     TimeOfDay,
     TopicalContext,
     INDEX_EMBEDDING_DIM,
+    // Emotional Memory (Brown & Kulik 1977, Bower 1981, LaBar & Cabeza 2006)
+    EmotionCategory,
+    EmotionalEvaluation,
+    EmotionalMemory,
+    EmotionalMemoryStats,
 };
 
 // Embeddings (when feature enabled)

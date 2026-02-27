@@ -1,23 +1,41 @@
 [package]
 name = "vestige-core"
-version = "1.1.2"
-edition = "2021"
-rust-version = "1.75"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Vestige Team"]
 description = "Cognitive memory engine - FSRS-6 spaced repetition, semantic embeddings, and temporal memory"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-only"
 repository = "https://github.com/samvallad33/vestige"
 keywords = ["memory", "spaced-repetition", "fsrs", "embeddings", "knowledge-graph"]
 categories = ["science", "database"]
 
 [features]
-default = ["embeddings", "vector-search"]
+default = ["embeddings", "vector-search", "bundled-sqlite"]
+
+# SQLite backend (default, unencrypted)
+bundled-sqlite = ["rusqlite/bundled"]
+
+# Encrypted SQLite via SQLCipher (mutually exclusive with bundled-sqlite)
+# Use: --no-default-features --features encryption,embeddings,vector-search
+# Set VESTIGE_ENCRYPTION_KEY env var to enable encryption
+encryption = ["rusqlite/bundled-sqlcipher"]
 
 # Core embeddings with fastembed (ONNX-based, local inference)
 embeddings = ["dep:fastembed"]
 
 # HNSW vector search with USearch (20x faster than FAISS)
 vector-search = ["dep:usearch"]
+
+# Nomic Embed Text v2 MoE (475M params, 305M active, Candle backend)
+# Requires: fastembed with nomic-v2-moe feature
+nomic-v2 = ["embeddings", "fastembed/nomic-v2-moe"]
+
+# Qwen3 Reranker (Candle backend, high-precision cross-encoder)
+qwen3-reranker = ["embeddings", "fastembed/qwen3"]
+
+# Metal GPU acceleration on Apple Silicon (significantly faster inference)
+metal = ["fastembed/metal"]
 
 # Full feature set including MCP protocol support
 full = ["embeddings", "vector-search"]
@@ -40,7 +58,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 
 # Database - SQLite with FTS5 full-text search and JSON
-rusqlite = { version = "0.38", features = ["bundled", "chrono", "serde_json"] }
+# Note: "bundled" or "bundled-sqlcipher" added via feature flags above
+rusqlite = { version = "0.38", features = ["chrono", "serde_json"] }
 
 # Platform-specific directories
 directories = "6"
@@ -62,7 +81,8 @@ notify = "8"
 # OPTIONAL: Embeddings (fastembed v5 - local ONNX inference, 2026 bleeding edge)
 # ============================================================================
 # nomic-embed-text-v1.5: 768 dimensions, 8192 token context, Matryoshka support
-fastembed = { version = "5", optional = true }
+# v5.11: Adds Nomic v2 MoE (nomic-v2-moe feature) + Qwen3 reranker (qwen3 feature)
+fastembed = { version = "5.11", optional = true }
 
 # ============================================================================
 # OPTIONAL: Vector Search (USearch - HNSW, 20x faster than FAISS)
@@ -74,6 +94,11 @@ lru = "0.16"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "search_bench"
+harness = false
 
 [lib]
 name = "vestige_core"

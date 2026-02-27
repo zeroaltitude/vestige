@@ -5,10 +5,13 @@ members = [
     "crates/vestige-mcp",
     "tests/e2e",
 ]
+exclude = [
+    "fastembed-rs",
+]
 
 [workspace.package]
-version = "1.0.0"
-edition = "2021"
+version = "1.9.2"
+edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/samvallad33/vestige"
 authors = ["Sam Valladares"]

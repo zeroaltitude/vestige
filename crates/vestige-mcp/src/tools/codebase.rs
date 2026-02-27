@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Codebase Tools (Deprecated - use codebase_unified instead)
 //!
 //! Remember patterns, decisions, and context about codebases.
@@ -7,7 +6,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{IngestInput, Storage};
 
@@ -116,7 +115,7 @@ struct ContextArgs {
 }
 
 pub async fn execute_pattern(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: PatternArgs = match args {
@@ -131,12 +130,12 @@ pub async fn execute_pattern(
     // Build content with structured format
     let mut content = format!("# Code Pattern: {}\n\n{}", args.name, args.description);
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -157,7 +156,6 @@ pub async fn execute_pattern(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -169,7 +167,7 @@ pub async fn execute_pattern(
 }
 
 pub async fn execute_decision(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: DecisionArgs = match args {
@@ -189,21 +187,21 @@ pub async fn execute_decision(
         args.decision
     );
 
-    if let Some(ref alternatives) = args.alternatives {
-        if !alternatives.is_empty() {
-            content.push_str("\n\n## Alternatives Considered:\n");
-            for alt in alternatives {
-                content.push_str(&format!("- {}\n", alt));
-            }
+    if let Some(ref alternatives) = args.alternatives
+        && !alternatives.is_empty()
+    {
+        content.push_str("\n\n## Alternatives Considered:\n");
+        for alt in alternatives {
+            content.push_str(&format!("- {}\n", alt));
         }
     }
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Affected Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Affected Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -224,7 +222,6 @@ pub async fn execute_decision(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -235,11 +232,11 @@ pub async fn execute_decision(
 }
 
 pub async fn execute_context(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ContextArgs = args
-        .map(|v| serde_json::from_value(v))
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|e| format!("Invalid arguments: {}", e))?
         .unwrap_or(ContextArgs {
@@ -248,7 +245,6 @@ pub async fn execute_context(
         });
 
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let storage = storage.lock().await;
 
     // Build tag filter for codebase
     // Tags are stored as: ["pattern", "codebase", "codebase:vestige"]

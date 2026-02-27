@@ -1,15 +1,12 @@
 //! Local Semantic Embeddings
 //!
-//! Uses fastembed v5 for local ONNX-based embedding generation.
-//! Default model: Nomic Embed Text v1.5 (768 dimensions, Matryoshka support)
+//! Uses fastembed v5.11 for local inference.
 //!
-//! ## 2026 GOD TIER UPGRADE
+//! ## Models
 //!
-//! Upgraded to nomic-embed-text-v1.5:
-//! - 768 dimensions with Matryoshka representation learning
-//! - 8192 token context window (vs 512 for most models)
-//! - State-of-the-art MTEB benchmark performance
-//! - Fully open source with training data released
+//! - **Default**: Nomic Embed Text v1.5 (ONNX, 768d → 256d Matryoshka, 8192 context)
+//! - **Optional**: Nomic Embed Text v2 MoE (Candle, 475M params, 305M active, 8 experts)
+//!   Enable with `nomic-v2` feature flag + `metal` for Apple Silicon acceleration.
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Mutex, OnceLock};
@@ -18,9 +15,10 @@ use std::sync::{Mutex, OnceLock};
 // CONSTANTS
 // ============================================================================
 
-/// Embedding dimensions for the default model (nomic-embed-text-v1.5)
-/// 768 dimensions with Matryoshka support (can truncate to 256/512 if needed)
-pub const EMBEDDING_DIMENSIONS: usize = 768;
+/// Embedding dimensions after Matryoshka truncation
+/// Truncated from 768 → 256 for 3x storage savings with only ~2% quality loss
+/// (Matryoshka Representation Learning — the first N dims ARE the N-dim representation)
+pub const EMBEDDING_DIMENSIONS: usize = 256;
 
 /// Maximum text length for embedding (truncated if longer)
 pub const MAX_TEXT_LENGTH: usize = 8192;
@@ -200,7 +198,7 @@ impl Embedding {
 
 /// Service for generating and managing embeddings
 pub struct EmbeddingService {
-    model_loaded: bool,
+    _unused: (),
 }
 
 impl Default for EmbeddingService {
@@ -213,7 +211,7 @@ impl EmbeddingService {
     /// Create a new embedding service
     pub fn new() -> Self {
         Self {
-            model_loaded: false,
+            _unused: (),
         }
     }
 
@@ -234,15 +232,17 @@ impl EmbeddingService {
     }
 
     /// Initialize the model (downloads if necessary)
-    pub fn init(&mut self) -> Result<(), EmbeddingError> {
+    pub fn init(&self) -> Result<(), EmbeddingError> {
         let _model = get_model()?; // Ensures model is loaded and returns any init errors
-        self.model_loaded = true;
         Ok(())
     }
 
     /// Get the model name
     pub fn model_name(&self) -> &'static str {
-        "nomic-ai/nomic-embed-text-v1.5"
+        #[cfg(feature = "nomic-v2")]
+        { "nomic-ai/nomic-embed-text-v2-moe" }
+        #[cfg(not(feature = "nomic-v2"))]
+        { "nomic-ai/nomic-embed-text-v1.5" }
     }
 
     /// Get the embedding dimensions
@@ -277,7 +277,7 @@ impl EmbeddingService {
             ));
         }
 
-        Ok(Embedding::new(embeddings[0].clone()))
+        Ok(Embedding::new(matryoshka_truncate(embeddings[0].clone())))
     }
 
     /// Generate embeddings for multiple texts (batch processing)
@@ -307,7 +307,7 @@ impl EmbeddingService {
                 .map_err(|e| EmbeddingError::EmbeddingFailed(e.to_string()))?;
 
             for emb in embeddings {
-                all_embeddings.push(Embedding::new(emb));
+                all_embeddings.push(Embedding::new(matryoshka_truncate(emb)));
             }
         }
 
@@ -337,6 +337,26 @@ impl EmbeddingService {
 // ============================================================================
 // SIMILARITY FUNCTIONS
 // ============================================================================
+
+/// Apply Matryoshka truncation: truncate to EMBEDDING_DIMENSIONS and L2-normalize
+///
+/// Nomic Embed v1.5 supports Matryoshka Representation Learning,
+/// meaning the first N dimensions of the 768-dim output ARE a valid
+/// N-dimensional embedding with minimal quality loss (~2% on MTEB for 256-dim).
+#[inline]
+pub fn matryoshka_truncate(mut vector: Vec<f32>) -> Vec<f32> {
+    if vector.len() > EMBEDDING_DIMENSIONS {
+        vector.truncate(EMBEDDING_DIMENSIONS);
+    }
+    // L2-normalize the truncated vector
+    let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in &mut vector {
+            *x /= norm;
+        }
+    }
+    vector
+}
 
 /// Compute cosine similarity between two vectors
 #[inline]

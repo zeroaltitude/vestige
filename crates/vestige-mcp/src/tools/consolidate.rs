@@ -1,11 +1,9 @@
-#![allow(dead_code)]
 //! Consolidation Tool (Deprecated)
 //!
 //! Run memory consolidation cycle with FSRS decay and embedding generation.
 
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::Storage;
 
@@ -17,8 +15,7 @@ pub fn schema() -> Value {
     })
 }
 
-pub async fn execute(storage: &Arc<Mutex<Storage>>) -> Result<Value, String> {
-    let mut storage = storage.lock().await;
+pub async fn execute(storage: &Arc<Storage>) -> Result<Value, String> {
     let result = storage.run_consolidation().map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({

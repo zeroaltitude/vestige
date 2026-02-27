@@ -14,7 +14,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use vestige_core::{IntentionRecord, Storage};
+use crate::cognitive::CognitiveEngine;
+use vestige_core::IntentionRecord;
+use vestige_core::Storage;
+use vestige_core::neuroscience::ProspectiveContext;
+use vestige_core::neuroscience::prospective_memory::IntentionTrigger as ProspectiveTrigger;
 
 /// Unified schema for the `intention` tool
 pub fn schema() -> Value {
@@ -195,7 +199,8 @@ struct UnifiedIntentionArgs {
 
 /// Execute the unified intention tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: UnifiedIntentionArgs = match args {
@@ -204,8 +209,8 @@ pub async fn execute(
     };
 
     match args.action.as_str() {
-        "set" => execute_set(storage, &args).await,
-        "check" => execute_check(storage, &args).await,
+        "set" => execute_set(storage, cognitive, &args).await,
+        "check" => execute_check(storage, cognitive, &args).await,
         "update" => execute_update(storage, &args).await,
         "list" => execute_list(storage, &args).await,
         _ => Err(format!(
@@ -221,7 +226,8 @@ pub async fn execute(
 
 /// Execute "set" action - create a new intention
 async fn execute_set(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let description = args
@@ -233,10 +239,73 @@ async fn execute_set(
         return Err("Description cannot be empty".to_string());
     }
 
+    if description.len() > 100_000 {
+        return Err("Description too large (max 100KB)".to_string());
+    }
+
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 
-    // Determine trigger type and data
+    // ====================================================================
+    // COGNITIVE: NLP parsing + intent auto-tagging
+    // ====================================================================
+    let mut nlp_parsed = false;
+    let mut nlp_trigger_type = None;
+    let mut nlp_trigger_data = None;
+    let mut nlp_priority = None;
+    let mut tags = Vec::new();
+
+    if let Ok(cog) = cognitive.try_lock() {
+        // 8A. Try NLP parsing when no explicit trigger is provided
+        if args.trigger.is_none()
+            && let Ok(parsed) = cog.intention_parser.parse(description)
+        {
+            nlp_parsed = true;
+            // Extract trigger info from parsed intention
+            let (t_type, t_data) = match &parsed.trigger {
+                ProspectiveTrigger::TimeBased { .. } => {
+                    ("time".to_string(), serde_json::json!({"type": "time"}).to_string())
+                }
+                ProspectiveTrigger::DurationBased { after, .. } => {
+                    let mins = after.num_minutes();
+                    ("time".to_string(), serde_json::json!({"type": "time", "in_minutes": mins}).to_string())
+                }
+                ProspectiveTrigger::EventBased { condition, .. } => {
+                    ("event".to_string(), serde_json::json!({"type": "event", "condition": condition}).to_string())
+                }
+                ProspectiveTrigger::ContextBased { context_match } => {
+                    ("context".to_string(), serde_json::json!({"type": "context", "topic": format!("{:?}", context_match)}).to_string())
+                }
+                ProspectiveTrigger::Recurring { .. } => {
+                    ("recurring".to_string(), serde_json::json!({"type": "recurring"}).to_string())
+                }
+                _ => {
+                    ("event".to_string(), serde_json::json!({"type": "event"}).to_string())
+                }
+            };
+            nlp_trigger_type = Some(t_type);
+            nlp_trigger_data = Some(t_data);
+
+            // Use NLP-detected priority if user didn't specify one
+            if args.priority.is_none() {
+                nlp_priority = Some(parsed.priority);
+            }
+        }
+
+        // Auto-tag with detected intent
+        let intent_result = cog.intent_detector.detect_intent();
+        if intent_result.confidence > 0.5 {
+            let intent_tag = format!("intent:{:?}", intent_result.primary_intent);
+            let intent_tag = if intent_tag.len() > 50 {
+                format!("{}...", &intent_tag[..47])
+            } else {
+                intent_tag
+            };
+            tags.push(intent_tag);
+        }
+    }
+
+    // Determine trigger type and data (explicit > NLP > manual)
     let (trigger_type, trigger_data) = if let Some(trigger) = &args.trigger {
         let t_type = trigger
             .trigger_type
@@ -244,16 +313,33 @@ async fn execute_set(
             .unwrap_or_else(|| "time".to_string());
         let data = serde_json::to_string(trigger).unwrap_or_else(|_| "{}".to_string());
         (t_type, data)
+    } else if let (Some(t_type), Some(t_data)) = (nlp_trigger_type, nlp_trigger_data) {
+        (t_type, t_data)
     } else {
         ("manual".to_string(), "{}".to_string())
     };
 
-    // Parse priority
+    // Parse priority (explicit > NLP > normal)
     let priority = match args.priority.as_deref() {
         Some("low") => 1,
         Some("high") => 3,
         Some("critical") => 4,
-        _ => 2, // normal
+        Some("normal") => 2,
+        Some(_) => 2,
+        None => {
+            // Use NLP-detected priority if available
+            if let Some(nlp_p) = nlp_priority {
+                use vestige_core::neuroscience::prospective_memory::Priority;
+                match nlp_p {
+                    Priority::Low => 1,
+                    Priority::Normal => 2,
+                    Priority::High => 3,
+                    Priority::Critical => 4,
+                }
+            } else {
+                2 // normal default
+            }
+        }
     };
 
     // Parse deadline
@@ -269,10 +355,8 @@ async fn execute_set(
             DateTime::parse_from_rfc3339(at)
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc))
-        } else if let Some(mins) = trigger.in_minutes {
-            Some(now + Duration::minutes(mins))
         } else {
-            None
+            trigger.in_minutes.map(|mins| now + Duration::minutes(mins))
         }
     } else {
         None
@@ -291,14 +375,13 @@ async fn execute_set(
         reminder_count: 0,
         last_reminded_at: None,
         notes: None,
-        tags: vec![],
+        tags,
         related_memories: vec![],
         snoozed_until: None,
-        source_type: "mcp".to_string(),
+        source_type: if nlp_parsed { "nlp" } else { "mcp" }.to_string(),
         source_data: None,
     };
 
-    let mut storage = storage.lock().await;
     storage.save_intention(&record).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -309,16 +392,38 @@ async fn execute_set(
         "priority": priority,
         "triggerAt": trigger_at.map(|dt| dt.to_rfc3339()),
         "deadline": deadline.map(|dt| dt.to_rfc3339()),
+        "nlpParsed": nlp_parsed,
     }))
 }
 
 /// Execute "check" action - find triggered intentions
 async fn execute_check(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let now = Utc::now();
-    let storage = storage.lock().await;
+
+    // ====================================================================
+    // COGNITIVE: Update prospective memory context
+    // ====================================================================
+    if let Some(ctx) = &args.context
+        && let Ok(cog) = cognitive.try_lock()
+    {
+        let mut prospective_ctx = ProspectiveContext::new();
+        if let Some(codebase) = &ctx.codebase {
+            prospective_ctx.project_name = Some(codebase.clone());
+        }
+        if let Some(file) = &ctx.file {
+            prospective_ctx.active_files = vec![file.clone()];
+        }
+        if let Some(topics) = &ctx.topics {
+            prospective_ctx.active_topics = topics.clone();
+        }
+        // Update context on prospective memory (triggers internal monitoring)
+        let _ = cog.prospective_memory.update_context(prospective_ctx);
+    }
+
 
     // Get active intentions
     let intentions = storage.get_active_intentions().map_err(|e| e.to_string())?;
@@ -411,7 +516,7 @@ async fn execute_check(
 
 /// Execute "update" action - complete, snooze, or cancel an intention
 async fn execute_update(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let intention_id = args
@@ -426,7 +531,6 @@ async fn execute_update(
 
     match status.as_str() {
         "complete" => {
-            let mut storage = storage.lock().await;
             let updated = storage
                 .update_intention_status(intention_id, "fulfilled")
                 .map_err(|e| e.to_string())?;
@@ -447,7 +551,6 @@ async fn execute_update(
             let minutes = args.snooze_minutes.unwrap_or(30);
             let snooze_until = Utc::now() + Duration::minutes(minutes);
 
-            let mut storage = storage.lock().await;
             let updated = storage
                 .snooze_intention(intention_id, snooze_until)
                 .map_err(|e| e.to_string())?;
@@ -466,7 +569,6 @@ async fn execute_update(
             }
         }
         "cancel" => {
-            let mut storage = storage.lock().await;
             let updated = storage
                 .update_intention_status(intention_id, "cancelled")
                 .map_err(|e| e.to_string())?;
@@ -492,11 +594,10 @@ async fn execute_update(
 
 /// Execute "list" action - list intentions with optional filtering
 async fn execute_list(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let filter_status = args.filter_status.as_deref().unwrap_or("active");
-    let storage = storage.lock().await;
 
     let intentions = if filter_status == "all" {
         // Get all by combining different statuses
@@ -567,22 +668,27 @@ async fn execute_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognitive::CognitiveEngine;
     use tempfile::TempDir;
 
+    fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
+        Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
+
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to create an intention and return its ID
-    async fn create_test_intention(storage: &Arc<Mutex<Storage>>, description: &str) -> String {
+    async fn create_test_intention(storage: &Arc<Storage>, description: &str) -> String {
         let args = serde_json::json!({
             "action": "set",
             "description": description
         });
-        let result = execute(storage, Some(args)).await.unwrap();
+        let result = execute(storage, &test_cognitive(), Some(args)).await.unwrap();
         result["intentionId"].as_str().unwrap().to_string()
     }
 
@@ -594,7 +700,7 @@ mod tests {
     async fn test_missing_action_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({});
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid arguments"));
     }
@@ -603,7 +709,7 @@ mod tests {
     async fn test_unknown_action_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "unknown" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown action"));
     }
@@ -611,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_arguments_fails() {
         let (storage, _dir) = test_storage().await;
-        let result = execute(&storage, None).await;
+        let result = execute(&storage, &test_cognitive(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing arguments"));
     }
@@ -627,7 +733,7 @@ mod tests {
             "action": "set",
             "description": "Remember to write unit tests"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -644,7 +750,7 @@ mod tests {
     async fn test_set_action_missing_description_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "set" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing 'description'"));
     }
@@ -656,7 +762,7 @@ mod tests {
             "action": "set",
             "description": ""
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
     }
@@ -669,7 +775,7 @@ mod tests {
             "description": "Critical bug fix needed",
             "priority": "critical"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -688,7 +794,7 @@ mod tests {
                 "at": future_time
             }
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -706,7 +812,7 @@ mod tests {
                 "inMinutes": 30
             }
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -722,7 +828,7 @@ mod tests {
             "description": "Complete feature by end of week",
             "deadline": deadline
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -737,7 +843,7 @@ mod tests {
     async fn test_check_action_empty_succeeds() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "check" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -753,7 +859,7 @@ mod tests {
         create_test_intention(&storage, "Future task").await;
 
         let args = serde_json::json!({ "action": "check" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -774,7 +880,7 @@ mod tests {
                 "codebase": "payments"
             }
         });
-        execute(&storage, Some(set_args)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(set_args)).await.unwrap();
 
         // Check with matching context
         let check_args = serde_json::json!({
@@ -783,7 +889,7 @@ mod tests {
                 "codebase": "payments-service"
             }
         });
-        let result = execute(&storage, Some(check_args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(check_args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -805,10 +911,10 @@ mod tests {
                 "at": past_time
             }
         });
-        execute(&storage, Some(set_args)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(set_args)).await.unwrap();
 
         let check_args = serde_json::json!({ "action": "check" });
-        let result = execute(&storage, Some(check_args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(check_args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -830,7 +936,7 @@ mod tests {
             "id": intention_id,
             "status": "complete"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -850,7 +956,7 @@ mod tests {
             "id": fake_id,
             "status": "complete"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
@@ -862,7 +968,7 @@ mod tests {
             "action": "update",
             "status": "complete"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing 'id'"));
     }
@@ -876,7 +982,7 @@ mod tests {
             "action": "update",
             "id": intention_id
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing 'status'"));
     }
@@ -896,7 +1002,7 @@ mod tests {
             "status": "snooze",
             "snooze_minutes": 30
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -916,7 +1022,7 @@ mod tests {
             "id": intention_id,
             "status": "snooze"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -937,7 +1043,7 @@ mod tests {
             "id": intention_id,
             "status": "cancel"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -956,7 +1062,7 @@ mod tests {
             "id": intention_id,
             "status": "invalid"
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown status"));
     }
@@ -969,7 +1075,7 @@ mod tests {
     async fn test_list_action_empty_succeeds() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "list" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -986,7 +1092,7 @@ mod tests {
         create_test_intention(&storage, "Second task").await;
 
         let args = serde_json::json!({ "action": "list" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -1004,7 +1110,7 @@ mod tests {
             "id": intention_id,
             "status": "complete"
         });
-        execute(&storage, Some(complete_args)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(complete_args)).await.unwrap();
 
         // Create another active one
         create_test_intention(&storage, "Active task").await;
@@ -1014,7 +1120,7 @@ mod tests {
             "action": "list",
             "filter_status": "fulfilled"
         });
-        let result = execute(&storage, Some(list_args)).await.unwrap();
+        let result = execute(&storage, &test_cognitive(), Some(list_args)).await.unwrap();
         assert_eq!(result["total"], 1);
         assert_eq!(result["status"], "fulfilled");
     }
@@ -1030,7 +1136,7 @@ mod tests {
             "action": "list",
             "limit": 3
         });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -1050,14 +1156,14 @@ mod tests {
             "id": intention_id,
             "status": "complete"
         });
-        execute(&storage, Some(complete_args)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(complete_args)).await.unwrap();
 
         // List all
         let list_args = serde_json::json!({
             "action": "list",
             "filter_status": "all"
         });
-        let result = execute(&storage, Some(list_args)).await.unwrap();
+        let result = execute(&storage, &test_cognitive(), Some(list_args)).await.unwrap();
         assert_eq!(result["total"], 2);
     }
 
@@ -1074,7 +1180,7 @@ mod tests {
 
         // 2. Verify it appears in list
         let list_args = serde_json::json!({ "action": "list" });
-        let list_result = execute(&storage, Some(list_args)).await.unwrap();
+        let list_result = execute(&storage, &test_cognitive(), Some(list_args)).await.unwrap();
         assert_eq!(list_result["total"], 1);
 
         // 3. Snooze it
@@ -1084,7 +1190,7 @@ mod tests {
             "status": "snooze",
             "snooze_minutes": 5
         });
-        let snooze_result = execute(&storage, Some(snooze_args)).await;
+        let snooze_result = execute(&storage, &test_cognitive(), Some(snooze_args)).await;
         assert!(snooze_result.is_ok());
 
         // 4. Complete it
@@ -1093,12 +1199,12 @@ mod tests {
             "id": intention_id,
             "status": "complete"
         });
-        let complete_result = execute(&storage, Some(complete_args)).await;
+        let complete_result = execute(&storage, &test_cognitive(), Some(complete_args)).await;
         assert!(complete_result.is_ok());
 
         // 5. Verify it's no longer active
         let final_list_args = serde_json::json!({ "action": "list" });
-        let final_list = execute(&storage, Some(final_list_args)).await.unwrap();
+        let final_list = execute(&storage, &test_cognitive(), Some(final_list_args)).await.unwrap();
         assert_eq!(final_list["total"], 0);
 
         // 6. Verify it's in fulfilled list
@@ -1106,7 +1212,7 @@ mod tests {
             "action": "list",
             "filter_status": "fulfilled"
         });
-        let fulfilled_list = execute(&storage, Some(fulfilled_args)).await.unwrap();
+        let fulfilled_list = execute(&storage, &test_cognitive(), Some(fulfilled_args)).await.unwrap();
         assert_eq!(fulfilled_list["total"], 1);
     }
 
@@ -1120,25 +1226,25 @@ mod tests {
             "description": "Low priority task",
             "priority": "low"
         });
-        execute(&storage, Some(args_low)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(args_low)).await.unwrap();
 
         let args_critical = serde_json::json!({
             "action": "set",
             "description": "Critical task",
             "priority": "critical"
         });
-        execute(&storage, Some(args_critical)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(args_critical)).await.unwrap();
 
         let args_normal = serde_json::json!({
             "action": "set",
             "description": "Normal task",
             "priority": "normal"
         });
-        execute(&storage, Some(args_normal)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(args_normal)).await.unwrap();
 
         // List and verify ordering (critical should be first due to priority DESC ordering)
         let list_args = serde_json::json!({ "action": "list" });
-        let list_result = execute(&storage, Some(list_args)).await.unwrap();
+        let list_result = execute(&storage, &test_cognitive(), Some(list_args)).await.unwrap();
         let intentions = list_result["intentions"].as_array().unwrap();
 
         assert!(intentions.len() >= 3);

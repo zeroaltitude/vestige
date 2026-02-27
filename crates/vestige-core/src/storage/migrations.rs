@@ -24,6 +24,31 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "GOD TIER 2026: Temporal knowledge graph, memory scopes, embedding versioning",
         up: MIGRATION_V4_UP,
     },
+    Migration {
+        version: 5,
+        description: "FSRS-6 upgrade: access history, ACT-R activation, personalized decay",
+        up: MIGRATION_V5_UP,
+    },
+    Migration {
+        version: 6,
+        description: "Dream history persistence for automation triggers",
+        up: MIGRATION_V6_UP,
+    },
+    Migration {
+        version: 7,
+        description: "Performance: page_size 8192, FTS5 porter tokenizer",
+        up: MIGRATION_V7_UP,
+    },
+    Migration {
+        version: 8,
+        description: "v1.9.0 Autonomic: waking SWR tags, utility scoring, retention tracking",
+        up: MIGRATION_V8_UP,
+    },
+    Migration {
+        version: 9,
+        description: "v2.0.0 Cognitive Leap: emotional memory, flashbulb encoding, temporal hierarchy",
+        up: MIGRATION_V9_UP,
+    },
 ];
 
 /// A database migration
@@ -390,6 +415,196 @@ CREATE INDEX IF NOT EXISTS idx_nodes_memory_system ON knowledge_nodes(memory_sys
 UPDATE schema_version SET version = 4, applied_at = datetime('now');
 "#;
 
+/// V5: FSRS-6 Upgrade - Access history for ACT-R activation, personalized decay parameters
+const MIGRATION_V5_UP: &str = r#"
+-- ============================================================================
+-- ACCESS HISTORY (For ACT-R Activation + Parameter Training)
+-- ============================================================================
+
+-- Logs every search hit, promote, demote for ACT-R activation computation
+CREATE TABLE IF NOT EXISTS memory_access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id TEXT NOT NULL,
+    access_type TEXT NOT NULL,  -- 'search_hit', 'promote', 'demote'
+    accessed_at TEXT NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES knowledge_nodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_log_node ON memory_access_log(node_id);
+CREATE INDEX IF NOT EXISTS idx_access_log_time ON memory_access_log(accessed_at);
+
+-- ============================================================================
+-- ACT-R ACTIVATION (Pre-computed during consolidation)
+-- ============================================================================
+
+-- B_i = ln(sum(t_j^(-d))) — NULL until first consolidation computes it
+ALTER TABLE knowledge_nodes ADD COLUMN activation REAL;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_activation ON knowledge_nodes(activation);
+
+-- ============================================================================
+-- PERSONALIZED FSRS-6 PARAMETERS
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS fsrs_config (
+    key TEXT PRIMARY KEY,
+    value REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Default w20 (forgetting curve decay parameter)
+INSERT OR IGNORE INTO fsrs_config (key, value, updated_at)
+VALUES ('w20', 0.1542, datetime('now'));
+
+-- ============================================================================
+-- EXTENDED CONSOLIDATION TRACKING
+-- ============================================================================
+
+ALTER TABLE consolidation_history ADD COLUMN duplicates_merged INTEGER DEFAULT 0;
+ALTER TABLE consolidation_history ADD COLUMN activations_computed INTEGER DEFAULT 0;
+ALTER TABLE consolidation_history ADD COLUMN w20_optimized REAL;
+
+UPDATE schema_version SET version = 5, applied_at = datetime('now');
+"#;
+
+/// V6: Dream history persistence for automation triggers
+/// Dreams were in-memory only (MemoryDreamer.dream_history Vec<DreamResult> lost on restart).
+/// This table persists dream metadata so system_status can report when last dream ran.
+const MIGRATION_V6_UP: &str = r#"
+CREATE TABLE IF NOT EXISTS dream_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dreamed_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    memories_replayed INTEGER NOT NULL DEFAULT 0,
+    connections_found INTEGER NOT NULL DEFAULT 0,
+    insights_generated INTEGER NOT NULL DEFAULT 0,
+    memories_strengthened INTEGER NOT NULL DEFAULT 0,
+    memories_compressed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_dream_history_dreamed_at ON dream_history(dreamed_at);
+
+UPDATE schema_version SET version = 6, applied_at = datetime('now');
+"#;
+
+/// V7: Performance — FTS5 porter tokenizer for 15-30% better keyword recall (stemming)
+/// page_size upgrade handled in apply_migrations() since VACUUM can't run inside execute_batch
+const MIGRATION_V7_UP: &str = r#"
+-- FTS5 porter tokenizer upgrade (15-30% better keyword recall via stemming)
+DROP TRIGGER IF EXISTS knowledge_ai;
+DROP TRIGGER IF EXISTS knowledge_ad;
+DROP TRIGGER IF EXISTS knowledge_au;
+DROP TABLE IF EXISTS knowledge_fts;
+
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    id, content, tags,
+    content='knowledge_nodes',
+    content_rowid='rowid',
+    tokenize='porter ascii'
+);
+
+-- Rebuild FTS index from existing data with new tokenizer
+INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');
+
+-- Re-create sync triggers
+CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(rowid, id, content, tags)
+    VALUES (NEW.rowid, NEW.id, NEW.content, NEW.tags);
+END;
+
+CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, id, content, tags)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.content, OLD.tags);
+END;
+
+CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, id, content, tags)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.content, OLD.tags);
+    INSERT INTO knowledge_fts(rowid, id, content, tags)
+    VALUES (NEW.rowid, NEW.id, NEW.content, NEW.tags);
+END;
+
+UPDATE schema_version SET version = 7, applied_at = datetime('now');
+"#;
+
+/// V8: v1.9.0 Autonomic — Waking SWR tags, utility scoring, retention trend tracking
+const MIGRATION_V8_UP: &str = r#"
+-- Waking SWR (Sharp-Wave Ripple) tagging
+-- Memories tagged during waking operation get preferential replay during dream cycles
+ALTER TABLE knowledge_nodes ADD COLUMN waking_tag BOOLEAN DEFAULT FALSE;
+ALTER TABLE knowledge_nodes ADD COLUMN waking_tag_at TEXT;
+
+-- Utility scoring (MemRL-inspired: times_useful / times_retrieved)
+ALTER TABLE knowledge_nodes ADD COLUMN utility_score REAL DEFAULT 0.0;
+ALTER TABLE knowledge_nodes ADD COLUMN times_retrieved INTEGER DEFAULT 0;
+ALTER TABLE knowledge_nodes ADD COLUMN times_useful INTEGER DEFAULT 0;
+
+-- Retention trend tracking (for retention target system)
+CREATE TABLE IF NOT EXISTS retention_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_at TEXT NOT NULL,
+    avg_retention REAL NOT NULL,
+    total_memories INTEGER NOT NULL,
+    memories_below_target INTEGER NOT NULL DEFAULT 0,
+    gc_triggered BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_retention_snapshots_at ON retention_snapshots(snapshot_at);
+
+UPDATE schema_version SET version = 8, applied_at = datetime('now');
+"#;
+
+/// V9: v2.0.0 Cognitive Leap — Emotional Memory, Flashbulb Encoding, Temporal Hierarchy
+///
+/// Adds columns for:
+/// - Emotional memory module (#29): valence scoring + flashbulb encoding (Brown & Kulik 1977)
+/// - Temporal Memory Tree: hierarchical summaries (daily/weekly/monthly) for TiMem-style recall
+/// - Dream phase tracking: per-phase metrics for 4-phase biologically-accurate dream cycles
+const MIGRATION_V9_UP: &str = r#"
+-- ============================================================================
+-- EMOTIONAL MEMORY (Brown & Kulik 1977, LaBar & Cabeza 2006)
+-- ============================================================================
+
+-- Emotional valence: -1.0 (very negative) to 1.0 (very positive)
+-- Used for mood-congruent retrieval and emotional decay modulation
+ALTER TABLE knowledge_nodes ADD COLUMN emotional_valence REAL DEFAULT 0.0;
+
+-- Flashbulb memory flag: ultra-high-fidelity encoding for high-importance + high-arousal events
+-- Flashbulb memories get minimum decay rate and maximum context capture
+ALTER TABLE knowledge_nodes ADD COLUMN flashbulb BOOLEAN DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_flashbulb ON knowledge_nodes(flashbulb);
+
+-- ============================================================================
+-- TEMPORAL MEMORY TREE (TiMem-inspired hierarchical consolidation)
+-- ============================================================================
+
+-- Temporal hierarchy level for summary nodes produced during dream consolidation
+-- NULL = leaf node (raw memory), 'daily'/'weekly'/'monthly' = summary at that level
+ALTER TABLE knowledge_nodes ADD COLUMN temporal_level TEXT;
+
+-- Parent summary ID: links a leaf memory to its containing summary
+ALTER TABLE knowledge_nodes ADD COLUMN summary_parent_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_temporal_level ON knowledge_nodes(temporal_level);
+CREATE INDEX IF NOT EXISTS idx_nodes_summary_parent ON knowledge_nodes(summary_parent_id);
+
+-- ============================================================================
+-- 4-PHASE DREAM CYCLE TRACKING (NREM1 → NREM3 → REM → Integration)
+-- ============================================================================
+
+-- Extended dream history with per-phase metrics
+ALTER TABLE dream_history ADD COLUMN phase_nrem1_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_nrem3_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_rem_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_integration_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN summaries_generated INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN emotional_memories_processed INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN creative_connections_found INTEGER DEFAULT 0;
+
+UPDATE schema_version SET version = 9, applied_at = datetime('now');
+"#;
+
 /// Get current schema version from database
 pub fn get_current_version(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
     conn.query_row(
@@ -415,6 +630,14 @@ pub fn apply_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
 
             // Use execute_batch to handle multi-statement SQL including triggers
             conn.execute_batch(migration.up)?;
+
+            // V7: Upgrade page_size to 8192 (10-30% faster large-row reads)
+            // VACUUM rewrites the DB with the new page size — can't run inside execute_batch
+            if migration.version == 7 {
+                conn.pragma_update(None, "page_size", 8192)?;
+                conn.execute_batch("VACUUM;")?;
+                tracing::info!("Database page_size upgraded to 8192 via VACUUM");
+            }
 
             applied += 1;
         }

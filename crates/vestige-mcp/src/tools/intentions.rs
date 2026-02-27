@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Intentions Tools (Deprecated - use intention_unified instead)
 //!
 //! Prospective memory tools for setting and checking future intentions.
@@ -6,7 +5,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use chrono::{DateTime, Utc, Duration};
 use uuid::Uuid;
 
@@ -223,7 +222,7 @@ struct ListArgs {
 
 /// Execute set_intention tool
 pub async fn execute_set(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: SetIntentionArgs = match args {
@@ -264,10 +263,8 @@ pub async fn execute_set(
     let trigger_at = if let Some(trigger) = &args.trigger {
         if let Some(at) = &trigger.at {
             DateTime::parse_from_rfc3339(at).ok().map(|dt| dt.with_timezone(&Utc))
-        } else if let Some(mins) = trigger.in_minutes {
-            Some(now + Duration::minutes(mins))
         } else {
-            None
+            trigger.in_minutes.map(|mins| now + Duration::minutes(mins))
         }
     } else {
         None
@@ -293,7 +290,6 @@ pub async fn execute_set(
         source_data: None,
     };
 
-    let mut storage = storage.lock().await;
     storage.save_intention(&record).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -308,7 +304,7 @@ pub async fn execute_set(
 
 /// Execute check_intentions tool
 pub async fn execute_check(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: CheckIntentionsArgs = match args {
@@ -317,7 +313,6 @@ pub async fn execute_check(
     };
 
     let now = Utc::now();
-    let storage = storage.lock().await;
 
     // Get active intentions
     let intentions = storage.get_active_intentions().map_err(|e| e.to_string())?;
@@ -403,7 +398,7 @@ pub async fn execute_check(
 
 /// Execute complete_intention tool
 pub async fn execute_complete(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: IntentionIdArgs = match args {
@@ -411,7 +406,6 @@ pub async fn execute_complete(
         None => return Err("Missing intention_id".to_string()),
     };
 
-    let mut storage = storage.lock().await;
     let updated = storage.update_intention_status(&args.intention_id, "fulfilled")
         .map_err(|e| e.to_string())?;
 
@@ -428,7 +422,7 @@ pub async fn execute_complete(
 
 /// Execute snooze_intention tool
 pub async fn execute_snooze(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: SnoozeArgs = match args {
@@ -439,7 +433,6 @@ pub async fn execute_snooze(
     let minutes = args.minutes.unwrap_or(30);
     let snooze_until = Utc::now() + Duration::minutes(minutes);
 
-    let mut storage = storage.lock().await;
     let updated = storage.snooze_intention(&args.intention_id, snooze_until)
         .map_err(|e| e.to_string())?;
 
@@ -457,7 +450,7 @@ pub async fn execute_snooze(
 
 /// Execute list_intentions tool
 pub async fn execute_list(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ListArgs = match args {
@@ -466,7 +459,6 @@ pub async fn execute_list(
     };
 
     let status = args.status.as_deref().unwrap_or("active");
-    let storage = storage.lock().await;
 
     let intentions = if status == "all" {
         // Get all by combining different statuses
@@ -525,14 +517,14 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to create an intention and return its ID
-    async fn create_test_intention(storage: &Arc<Mutex<Storage>>, description: &str) -> String {
+    async fn create_test_intention(storage: &Arc<Storage>, description: &str) -> String {
         let args = serde_json::json!({
             "description": description
         });

@@ -8,14 +8,39 @@
 
 // Active unified tools
 pub mod codebase_unified;
-pub mod ingest;
 pub mod intention_unified;
 pub mod memory_unified;
 pub mod search_unified;
 pub mod smart_ingest;
 
+// v1.2: Temporal query tools
+pub mod changelog;
+pub mod timeline;
+
+// v1.2: Maintenance tools
+pub mod maintenance;
+
+// v1.3: Auto-save and dedup tools
+pub mod dedup;
+pub mod importance;
+
+// v1.5: Cognitive tools
+pub mod dream;
+pub mod explore;
+pub mod predict;
+pub mod restore;
+
+// v1.8: Context Packets
+pub mod session_context;
+
+// v1.9: Autonomic tools
+pub mod health;
+pub mod graph;
+
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
+#[allow(dead_code)]
+pub mod checkpoint;
 #[allow(dead_code)]
 pub mod codebase;
 #[allow(dead_code)]
@@ -24,6 +49,8 @@ pub mod consolidate;
 pub mod context;
 #[allow(dead_code)]
 pub mod feedback;
+#[allow(dead_code)]
+pub mod ingest;
 #[allow(dead_code)]
 pub mod intentions;
 #[allow(dead_code)]
