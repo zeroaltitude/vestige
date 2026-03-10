@@ -99,37 +99,24 @@ impl HttpTransport {
     }
 }
 
-/// Get or create a session, returning (session, session_id, is_new)
-async fn get_or_create_session(
+/// Create a brand-new session (only for `initialize` requests).
+async fn create_session(
     state: &AppState,
-    headers: &HeaderMap,
-) -> (Arc<Session>, String, bool) {
-    let existing_id = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let mut sessions = state.sessions.lock().await;
-
-    if let Some(id) = &existing_id {
-        if let Some(session) = sessions.get(id) {
-            return (session.clone(), id.clone(), false);
-        }
-    }
-
-    // Create new session
+) -> (Arc<Session>, String) {
     let session_id = Uuid::new_v4().to_string();
     let server = McpServer::new(state.storage.clone(), state.cognitive.clone());
     let session = Arc::new(Session {
         server: Mutex::new(server),
     });
+    let mut sessions = state.sessions.lock().await;
     sessions.insert(session_id.clone(), session.clone());
     info!("Created new MCP session: {}", session_id);
-    (session, session_id, true)
+    (session, session_id)
 }
 
-/// Look up an existing session by header
-async fn get_existing_session(
+/// Look up an existing session by the Mcp-Session-Id header.
+/// Returns None if the header is missing or the session doesn't exist.
+async fn find_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Option<(Arc<Session>, String)> {
@@ -162,8 +149,32 @@ async fn handle_post(
         }
     };
 
-    // Get or create session
-    let (session, session_id, _is_new) = get_or_create_session(&state, &headers).await;
+    // Route session: `initialize` creates a new session; everything else
+    // requires an existing one (looked up by Mcp-Session-Id header).
+    let (session, session_id) = if request.method == "initialize" {
+        // Always create a fresh session for initialize
+        create_session(&state).await
+    } else {
+        match find_session(&state, &headers).await {
+            Some(found) => found,
+            None => {
+                warn!(
+                    "Rejecting '{}': no valid session (missing or stale Mcp-Session-Id)",
+                    request.method
+                );
+                let error_resp = JsonRpcResponse::error(
+                    request.id,
+                    JsonRpcError::no_valid_session(),
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    serde_json::to_string(&error_resp).unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        }
+    };
 
     // Handle the request
     let mut server = session.server.lock().await;
@@ -231,7 +242,7 @@ async fn handle_get(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    let session = get_existing_session(&state, &headers).await;
+    let session = find_session(&state, &headers).await;
 
     match session {
         Some((_session, session_id)) => {

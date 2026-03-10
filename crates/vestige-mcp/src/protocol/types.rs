@@ -129,6 +129,10 @@ impl JsonRpcError {
         Self::new(ErrorCode::ServerNotInitialized, "Server not initialized")
     }
 
+    pub fn no_valid_session() -> Self {
+        Self::new(ErrorCode::ServerNotInitialized, "No valid MCP session — send initialize first")
+    }
+
     #[allow(dead_code)] // Reserved for future resource handling
     pub fn resource_not_found(uri: &str) -> Self {
         Self::new(ErrorCode::ResourceNotFound, &format!("Resource not found: {}", uri))
