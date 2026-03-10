@@ -10,9 +10,10 @@ categories = ["command-line-utilities", "database"]
 repository = "https://github.com/samvallad33/vestige"
 
 [features]
-default = ["embeddings", "vector-search"]
+default = ["embeddings", "vector-search", "http"]
 embeddings = ["vestige-core/embeddings"]
 vector-search = ["vestige-core/vector-search"]
+http = []
 
 [[bin]]
 name = "vestige-mcp"
@@ -64,19 +65,23 @@ directories = "6"
 # Official Anthropic MCP Rust SDK
 rmcp = "0.14"
 
+# HTTP transport + Dashboard (merged: our HTTP transport + upstream dashboard both need axum)
+# Note: axum is no longer optional — the dashboard requires it unconditionally.
+# The "http" feature flag gates the HTTP *transport* code path in protocol/http.rs,
+# not the axum dependency itself.
+axum = { version = "0.8", features = ["json", "query", "tokio", "http1", "ws"] }
+futures = { version = "0.3" }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
+futures-util = "0.3"
+open = "5"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 
 # SQLite (for backup WAL checkpoint)
 rusqlite = { version = "0.38", features = ["bundled"] }
-
-# Dashboard (v1.2) - hyper/tower already in Cargo.lock via rmcp/reqwest
-axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1", "ws"] }
-tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.6", features = ["cors", "set-header"] }
-futures-util = "0.3"
-open = "5"
 
 # Embedded SvelteKit dashboard (v2.0)
 include_dir = "0.7"
