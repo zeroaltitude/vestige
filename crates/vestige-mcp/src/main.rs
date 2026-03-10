@@ -286,8 +286,9 @@ async fn main() {
                 };
 
                 if should_run {
-                    match storage_clone.run_consolidation() {
-                        Ok(result) => {
+                    let sc = Arc::clone(&storage_clone);
+                    match tokio::task::spawn_blocking(move || sc.run_consolidation()).await {
+                        Ok(Ok(result)) => {
                             info!(
                                 nodes_processed = result.nodes_processed,
                                 decay_applied = result.decay_applied,
@@ -298,8 +299,11 @@ async fn main() {
                                 "Periodic auto-consolidation complete"
                             );
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             warn!("Periodic auto-consolidation failed: {}", e);
+                        }
+                        Err(e) => {
+                            warn!("Periodic auto-consolidation task panicked: {}", e);
                         }
                     }
                 }
@@ -350,8 +354,12 @@ async fn main() {
         tokio::spawn(async move {
             // Small delay so we don't block the stdio handshake
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let mut cog = cog_clone.lock().await;
-            cog.reranker.init_cross_encoder();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                let mut cog = cog_clone.blocking_lock();
+                cog.reranker.init_cross_encoder();
+            }).await {
+                tracing::warn!("Cross-encoder init task panicked: {}", e);
+            }
         });
     }
 
