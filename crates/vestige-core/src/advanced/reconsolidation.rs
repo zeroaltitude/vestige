@@ -769,11 +769,7 @@ impl ReconsolidationStats {
 
 /// Truncate string for display
 fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        &s[..max_len]
-    }
+    if s.len() <= max_len { s } else { &s[..max_len] }
 }
 
 // ============================================================================

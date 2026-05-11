@@ -193,7 +193,11 @@ impl SpeculativeRetriever {
 
         // Deduplicate and sort by confidence
         predictions = self.deduplicate_predictions(predictions);
-        predictions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        predictions.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         predictions.truncate(MAX_PREDICTIONS);
 
         // Filter by minimum confidence

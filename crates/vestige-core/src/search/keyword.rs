@@ -49,7 +49,10 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         let end_pattern = format!(" {}", op);
         if upper.ends_with(&end_pattern) {
             let char_count = sanitized.chars().count();
-            sanitized = sanitized.chars().take(char_count.saturating_sub(op.len())).collect();
+            sanitized = sanitized
+                .chars()
+                .take(char_count.saturating_sub(op.len()))
+                .collect();
         }
     }
 
@@ -61,8 +64,21 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         return "\"\"".to_string(); // Empty phrase - matches nothing safely
     }
 
-    // Wrap in quotes to treat as literal phrase search
-    format!("\"{}\"", sanitized)
+    // Wrap each remaining token as its own phrase so multi-word queries
+    // become an implicit AND of single-term matches, not a phrase search.
+    // This ensures FTS5 scores each term independently via BM25 rather than
+    // requiring the exact multi-word phrase to appear consecutively.
+    let tokens: Vec<String> = sanitized
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t))
+        .collect();
+
+    if tokens.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    tokens.join(" ")
 }
 
 // ============================================================================
@@ -199,20 +215,29 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_basic() {
-        assert_eq!(sanitize_fts5_query("hello world"), "\"hello world\"");
+        // Multi-word query: each token is individually quoted (implicit AND, not phrase)
+        assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" \"world\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_operators() {
-        assert_eq!(sanitize_fts5_query("hello OR world"), "\"hello world\"");
-        assert_eq!(sanitize_fts5_query("hello AND world"), "\"hello world\"");
+        // Boolean operators are stripped; remaining tokens individually quoted
+        assert_eq!(sanitize_fts5_query("hello OR world"), "\"hello\" \"world\"");
+        assert_eq!(
+            sanitize_fts5_query("hello AND world"),
+            "\"hello\" \"world\""
+        );
         assert_eq!(sanitize_fts5_query("NOT hello"), "\"hello\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_special_chars() {
-        assert_eq!(sanitize_fts5_query("hello* world"), "\"hello world\"");
-        assert_eq!(sanitize_fts5_query("content:secret"), "\"content secret\"");
+        // Special chars stripped; remaining tokens individually quoted
+        assert_eq!(sanitize_fts5_query("hello* world"), "\"hello\" \"world\"");
+        assert_eq!(
+            sanitize_fts5_query("content:secret"),
+            "\"content\" \"secret\""
+        );
         assert_eq!(sanitize_fts5_query("^boost"), "\"boost\"");
     }
 
@@ -225,9 +250,22 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_length_limit() {
+        // 2000 'a' chars → capped at 1000 → one token → "a"*1000 in quotes = 1002 chars
         let long_query = "a".repeat(2000);
         let sanitized = sanitize_fts5_query(&long_query);
-        assert!(sanitized.len() <= 1004);
+        // Single token of 1000 chars → "<1000 a's>" = 1002 chars
+        assert!(sanitized.len() <= 1010);
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_multi_word_is_implicit_and() {
+        // The bug: multi-word queries must NOT produce a single quoted phrase.
+        // Each token should be wrapped individually so FTS5 treats them as
+        // implicit AND (term matches) rather than a consecutive phrase.
+        let result = sanitize_fts5_query("tell me about Reccy");
+        assert_eq!(result, "\"tell\" \"me\" \"about\" \"Reccy\"");
+        // Must NOT be the old single-phrase format:
+        assert_ne!(result, "\"tell me about Reccy\"");
     }
 
     #[test]

@@ -1187,7 +1187,11 @@ impl RewardSignal {
 
             // Limit pattern count
             if patterns.len() > 1000 {
-                patterns.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+                patterns.sort_by(|a, b| {
+                    b.strength
+                        .partial_cmp(&a.strength)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 patterns.truncate(500);
             }
         }
@@ -1227,7 +1231,9 @@ impl RewardSignal {
 
         entries.sort_by(|a, b| {
             // Sort by score, then by recency
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.2.cmp(&a.2))
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.2.cmp(&a.2))
         });
 
         // Keep top entries

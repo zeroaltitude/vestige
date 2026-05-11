@@ -210,9 +210,7 @@ impl Default for EmbeddingService {
 impl EmbeddingService {
     /// Create a new embedding service
     pub fn new() -> Self {
-        Self {
-            _unused: (),
-        }
+        Self { _unused: () }
     }
 
     /// Check if the model is ready
@@ -240,9 +238,13 @@ impl EmbeddingService {
     /// Get the model name
     pub fn model_name(&self) -> &'static str {
         #[cfg(feature = "nomic-v2")]
-        { "nomic-ai/nomic-embed-text-v2-moe" }
+        {
+            "nomic-ai/nomic-embed-text-v2-moe"
+        }
         #[cfg(not(feature = "nomic-v2"))]
-        { "nomic-ai/nomic-embed-text-v1.5" }
+        {
+            "nomic-ai/nomic-embed-text-v1.5"
+        }
     }
 
     /// Get the embedding dimensions
