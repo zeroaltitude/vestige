@@ -933,6 +933,14 @@ fn content_word_similarity(content_a: &str, content_b: &str) -> f64 {
 pub struct DreamResult {
     /// Number of new connections discovered
     pub new_connections_found: usize,
+    /// The connections discovered by *this* dream cycle.
+    ///
+    /// Callers that persist connections must use this rather than diffing
+    /// [`MemoryDreamer::get_connections`], which is a capped ring of the last
+    /// 1000 connections and therefore stops growing once saturated.
+    /// Cleared on the copy kept in the dreamer's own history to bound memory.
+    #[serde(default)]
+    pub discovered_connections: Vec<DiscoveredConnection>,
     /// Number of memories that were strengthened
     pub memories_strengthened: usize,
     /// Number of memories that were compressed
@@ -1181,11 +1189,24 @@ impl MemoryDreamer {
             duration_ms: start.elapsed().as_millis() as u64,
             dreamed_at: Utc::now(),
             stats,
+            discovered_connections: new_connections,
         };
 
-        // Store in history
+        // Store in history — without the connection payload. A single dream over
+        // a few hundred memories can discover tens of thousands of connections,
+        // and history keeps 100 dreams; callers read the connections from the
+        // returned result instead.
         if let Ok(mut history) = self.dream_history.write() {
-            history.push(result.clone());
+            history.push(DreamResult {
+                new_connections_found: result.new_connections_found,
+                memories_strengthened: result.memories_strengthened,
+                memories_compressed: result.memories_compressed,
+                insights_generated: result.insights_generated.clone(),
+                duration_ms: result.duration_ms,
+                dreamed_at: result.dreamed_at,
+                stats: result.stats.clone(),
+                discovered_connections: Vec::new(),
+            });
             // Keep last 100 dreams
             if history.len() > 100 {
                 history.remove(0);
@@ -1820,6 +1841,64 @@ mod tests {
 
         assert!(result.stats.memories_analyzed == 4);
         assert!(result.stats.connections_evaluated > 0);
+    }
+
+    /// `store_connections` keeps only the last 1000 connections, so callers must
+    /// not derive "what did this dream find" by diffing `get_connections()`
+    /// against a pre-dream length — that diff is empty once the buffer saturates.
+    /// `DreamResult::discovered_connections` must stay accurate regardless.
+    #[tokio::test]
+    async fn test_dream_result_reports_connections_after_buffer_saturation() {
+        let dreamer = MemoryDreamer::new();
+
+        // 60 mutually similar memories => 1770 pairs, well past the 1000 cap.
+        let memories: Vec<DreamMemory> = (0..60)
+            .map(|i| {
+                make_memory(
+                    &format!("m{i}"),
+                    &format!("Database indexing improves query performance, note {i}"),
+                    vec!["database", "performance"],
+                )
+            })
+            .collect();
+
+        let first = dreamer.dream(&memories).await;
+        assert!(
+            first.new_connections_found > 1000,
+            "test setup: expected the first dream to overflow the 1000-connection buffer, got {}",
+            first.new_connections_found
+        );
+        assert_eq!(
+            first.discovered_connections.len(),
+            first.new_connections_found,
+            "discovered_connections must hold every connection counted"
+        );
+
+        // The shared buffer is now saturated: its length no longer grows.
+        let saturated = dreamer.get_connections().len();
+        assert_eq!(saturated, 1000);
+
+        let second = dreamer.dream(&memories).await;
+        assert_eq!(
+            dreamer.get_connections().len(),
+            saturated,
+            "test setup: buffer length should be pinned at the cap"
+        );
+        assert_eq!(
+            second.discovered_connections.len(),
+            second.new_connections_found,
+            "a saturated buffer must not hide the second dream's connections"
+        );
+        assert!(second.new_connections_found > 0);
+
+        // History keeps the counts but drops the payload (memory bound).
+        let history = dreamer.get_dream_history();
+        assert_eq!(history.len(), 2);
+        assert!(history[0].discovered_connections.is_empty());
+        assert_eq!(
+            history[0].new_connections_found,
+            first.new_connections_found
+        );
     }
 
     #[test]
