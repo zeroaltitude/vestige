@@ -88,14 +88,15 @@ pub async fn execute(
     }).collect();
 
     let cog = cognitive.lock().await;
-    let pre_dream_count = cog.dreamer.get_connections().len();
     let dream_result = cog.dreamer.dream(&dream_memories).await;
     let insights = cog.dreamer.synthesize_insights(&dream_memories);
-    let all_connections = cog.dreamer.get_connections();
     drop(cog);
 
-    // v1.9.0: Persist only NEW connections from this dream (skip accumulated ones)
-    let new_connections = &all_connections[pre_dream_count..];
+    // Persist only the connections this dream discovered. These come straight
+    // off the DreamResult — do NOT diff dreamer.get_connections() by index: that
+    // buffer is a capped ring of the last 1000 connections, so once it saturates
+    // the diff is always empty and nothing is ever persisted.
+    let new_connections = &dream_result.discovered_connections;
     let mut connections_persisted = 0u64;
     {
         let now = Utc::now();
@@ -286,6 +287,52 @@ mod tests {
         assert!(value["stats"]["memories_compressed"].is_number());
         assert!(value["stats"]["insights_generated"].is_number());
         assert!(value["stats"]["duration_ms"].is_number());
+    }
+
+    /// Regression test for the "connectionsPersisted is always 0" bug.
+    ///
+    /// The dreamer keeps only the last 1000 discovered connections in its
+    /// in-memory buffer. The old implementation persisted
+    /// `get_connections()[pre_dream_count..]`, which becomes an empty slice as
+    /// soon as that buffer saturates — so every dream after the first one
+    /// persisted nothing, no matter how many connections it discovered.
+    #[tokio::test]
+    async fn test_dream_persists_connections_on_consecutive_dreams() {
+        let (storage, _dir) = test_storage().await;
+        // Enough memories that a single dream discovers >1000 connections,
+        // saturating the dreamer's internal 1000-connection buffer.
+        ingest_n_memories(&storage, 60).await;
+        let cognitive = test_cognitive();
+
+        let args = serde_json::json!({ "memory_count": 60 });
+        let first = execute(&storage, &cognitive, Some(args.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first["status"], "dreamed");
+
+        let second = execute(&storage, &cognitive, Some(args)).await.unwrap();
+        assert_eq!(second["status"], "dreamed");
+
+        // Invariant: a dream that discovers connections must persist them.
+        for (label, value) in [("first", &first), ("second", &second)] {
+            let found = value["stats"]["new_connections_found"].as_u64().unwrap();
+            let persisted = value["connectionsPersisted"].as_u64().unwrap();
+            assert!(
+                found > 0,
+                "{label} dream should have discovered connections (test setup)"
+            );
+            assert!(
+                persisted > 0,
+                "{label} dream found {found} connections but persisted {persisted}"
+            );
+        }
+
+        // And they must actually be in the store.
+        let stored = storage.get_all_connections().unwrap();
+        assert!(
+            !stored.is_empty(),
+            "connections should be readable back from storage"
+        );
     }
 
     #[tokio::test]
