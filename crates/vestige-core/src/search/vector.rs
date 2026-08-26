@@ -390,9 +390,45 @@ impl VectorIndex {
 mod tests {
     use super::*;
 
+    /// A sine sampled with a `seed`-sized phase offset.
+    ///
+    /// Note that nearby seeds produce *nearly parallel* vectors: the offset is
+    /// only `seed / DEFAULT_DIMENSIONS` radians, so seeds 1.0 and 2.0 differ by
+    /// 1/256 rad and their cosine similarity is > 0.999. Do not use this helper
+    /// to assert a nearest-neighbour *ranking* — see `create_banded_vector`.
     fn create_test_vector(seed: f32) -> Vec<f32> {
         (0..DEFAULT_DIMENSIONS)
             .map(|i| ((i as f32 + seed) / DEFAULT_DIMENSIONS as f32).sin())
+            .collect()
+    }
+
+    /// A half-sine bump confined to band `band` of `bands` disjoint, equal-width
+    /// slices of the dimension space; zero everywhere else.
+    ///
+    /// Vectors from different bands have **disjoint support**, so their dot
+    /// product — and hence their cosine similarity — is exactly 0 no matter how
+    /// the components are scaled. That is what makes a rank-0 assertion
+    /// meaningful against this index, which is both approximate (HNSW) and
+    /// quantized (`ScalarKind::I8`): quantization is a per-component scaling, so
+    /// it maps zeros to zeros and cannot erode the separation, and the margin
+    /// between rank 0 and rank 1 stays ~1.0 in cosine distance — orders of
+    /// magnitude above any SIMD rounding difference between backends.
+    ///
+    /// This exists because `create_test_vector(1.0)` vs `create_test_vector(2.0)`
+    /// left rank 0 a genuine tie that arm64/NEON and x86_64 broke differently
+    /// (openclaw-vestige-hvq).
+    fn create_banded_vector(band: usize, bands: usize) -> Vec<f32> {
+        let width = DEFAULT_DIMENSIONS / bands;
+        let start = band * width;
+        (0..DEFAULT_DIMENSIONS)
+            .map(|i| {
+                if (start..start + width).contains(&i) {
+                    let t = (i - start) as f32 / width as f32;
+                    (t * std::f32::consts::PI).sin()
+                } else {
+                    0.0
+                }
+            })
             .collect()
     }
 
@@ -408,9 +444,13 @@ mod tests {
     fn test_add_and_search() {
         let mut index = VectorIndex::new().unwrap();
 
-        let v1 = create_test_vector(1.0);
-        let v2 = create_test_vector(2.0);
-        let v3 = create_test_vector(100.0);
+        // Mutually orthogonal fixtures — see `create_banded_vector`. Rank 0 is
+        // then decided by a ~1.0 cosine-distance margin, which survives I8
+        // quantization and differs by no more than rounding across SIMD
+        // backends (openclaw-vestige-hvq).
+        let v1 = create_banded_vector(0, 3);
+        let v2 = create_banded_vector(1, 3);
+        let v3 = create_banded_vector(2, 3);
 
         index.add("node-1", &v1).unwrap();
         index.add("node-2", &v2).unwrap();
@@ -420,9 +460,29 @@ mod tests {
         assert!(index.contains("node-1"));
         assert!(!index.contains("node-999"));
 
-        let results = index.search(&v1, 3).unwrap();
-        assert!(!results.is_empty());
-        assert_eq!(results[0].0, "node-1");
+        // Every vector must retrieve itself first. Querying all three rules out
+        // a "search always returns the first-added key" style regression.
+        for (query, expected) in [(&v1, "node-1"), (&v2, "node-2"), (&v3, "node-3")] {
+            let results = index.search(query, 3).unwrap();
+            assert!(!results.is_empty(), "search for {expected} found nothing");
+            assert_eq!(
+                results[0].0, expected,
+                "wrong nearest neighbour: {results:?}"
+            );
+
+            // An exact query is its own match, so rank 0 scores ~1.0 while the
+            // orthogonal candidates score ~0.0. Asserting the margin rather than
+            // the full ordering keeps this true of an approximate index, which
+            // is not obliged to return every candidate.
+            let (_, top_score) = &results[0];
+            assert!(*top_score > 0.9, "weak self-match score: {results:?}");
+            for (key, score) in results.iter().skip(1) {
+                assert!(
+                    score < top_score,
+                    "rank 0 must beat {key} ({score}): {results:?}"
+                );
+            }
+        }
     }
 
     #[test]
