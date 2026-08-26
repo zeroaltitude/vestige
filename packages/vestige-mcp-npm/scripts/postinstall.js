@@ -7,9 +7,44 @@ const os = require('os');
 const { execSync } = require('child_process');
 
 const VERSION = require('../package.json').version;
-const BINARY_VERSION = '1.1.3'; // GitHub release version for binaries
+// GitHub release tag the prebuilt binaries are fetched from. Derived from the package
+// version so the two can never silently drift (this file previously announced v2.0.0 while
+// requesting the v1.1.3 assets, a tag that does not exist -> unconditional 404).
+// Override with VESTIGE_BINARY_VERSION when a package version has no matching release tag.
+const BINARY_VERSION = process.env.VESTIGE_BINARY_VERSION || VERSION;
 const PLATFORM = os.platform();
 const ARCH = os.arch();
+
+/**
+ * True when this script is running from the Vestige source monorepo rather than from an
+ * installed copy of the published npm package. All four conditions have to hold, and a
+ * published tarball (which unpacks to node_modules/vestige-mcp-server) satisfies none of
+ * them, so this can never accidentally no-op a real consumer install.
+ */
+function isWorkspaceCheckout() {
+  const packageRoot = path.resolve(__dirname, '..'); // packages/vestige-mcp-npm
+  const repoRoot = path.resolve(packageRoot, '..', '..'); // repo root
+  return (
+    path.basename(packageRoot) === 'vestige-mcp-npm' &&
+    path.basename(path.dirname(packageRoot)) === 'packages' &&
+    fs.existsSync(path.join(repoRoot, 'pnpm-workspace.yaml')) &&
+    fs.existsSync(path.join(repoRoot, 'crates', 'vestige-mcp', 'Cargo.toml'))
+  );
+}
+
+// Nothing in the monorepo consumes the prebuilt binary — inside the source tree it is built
+// with `cargo build --release -p vestige-mcp`. Downloading a release asset there is pointless,
+// and it is what breaks the Dashboard Build CI job: pnpm resolves to the workspace root even
+// when invoked from apps/dashboard, so the dashboard install runs this postinstall.
+if (
+  process.env.VESTIGE_SKIP_BINARY_DOWNLOAD === '1' ||
+  process.env.VESTIGE_MCP_SKIP_DOWNLOAD === '1' ||
+  isWorkspaceCheckout()
+) {
+  console.log('Skipping Vestige MCP binary download (source checkout or explicit skip).');
+  console.log('Build it from source instead: cargo build --release -p vestige-mcp');
+  process.exit(0);
+}
 
 const PLATFORM_MAP = {
   darwin: 'apple-darwin',
@@ -166,6 +201,11 @@ async function main() {
     console.error(`  1. Download: ${downloadUrl}`);
     console.error(`  2. Extract to: ${targetDir}`);
     console.error('  3. Ensure binaries are executable (chmod +x on Unix)');
+    console.error('');
+    console.error('Other options:');
+    console.error('  - Pick a different release tag: VESTIGE_BINARY_VERSION=<x.y.z> npm install');
+    console.error('  - Skip the download entirely:   VESTIGE_MCP_SKIP_DOWNLOAD=1 npm install');
+    console.error('    (the vestige-mcp / vestige wrappers will then error until a binary exists)');
     console.error('');
     process.exit(1);
   }
