@@ -2,6 +2,12 @@
 //!
 //! Provides keyword-based search using SQLite FTS5.
 //! Includes query sanitization for security.
+//!
+//! This module is deliberately **not** gated behind the `vector-search` feature:
+//! FTS5 queries are issued by [`crate::storage`] on every build, so the sanitizer
+//! must be available even when HNSW vector search is compiled out. It is
+//! re-exported from [`crate::search`] when that feature is enabled so the
+//! `vestige_core::search::sanitize_fts5_query` path keeps working.
 
 // ============================================================================
 // FTS5 QUERY SANITIZATION

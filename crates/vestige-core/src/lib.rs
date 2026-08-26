@@ -82,6 +82,11 @@
 
 pub mod consolidation;
 pub mod fsrs;
+/// Keyword (BM25/FTS5) search helpers, including FTS5 query sanitization.
+///
+/// Ungated: `storage` issues FTS5 queries in every configuration, so this must
+/// build without the `vector-search` feature. Also re-exported from `search`.
+pub mod keyword;
 pub mod memory;
 pub mod storage;
 
@@ -388,6 +393,9 @@ pub use embeddings::{
     EMBEDDING_DIMENSIONS, EMBEDDING_MODEL_NAME,
 };
 
+// Keyword search (always available - FTS5 does not depend on vector-search)
+pub use keyword::{sanitize_fts5_query, KeywordSearcher};
+
 // Search (when feature enabled)
 #[cfg(feature = "vector-search")]
 pub use search::{
@@ -396,8 +404,6 @@ pub use search::{
     HybridSearchConfig,
     // Hybrid search
     HybridSearcher,
-    // Keyword search
-    KeywordSearcher,
     VectorIndex,
     VectorIndexConfig,
     VectorIndexStats,

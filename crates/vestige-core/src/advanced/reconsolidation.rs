@@ -678,7 +678,7 @@ impl ReconsolidationManager {
             .read()
             .map(|history| {
                 let mut recent: Vec<_> = history.iter().cloned().collect();
-                recent.sort_by(|a, b| b.retrieved_at.cmp(&a.retrieved_at));
+                recent.sort_by_key(|a| std::cmp::Reverse(a.retrieved_at));
                 recent.into_iter().take(limit).collect()
             })
             .unwrap_or_default()

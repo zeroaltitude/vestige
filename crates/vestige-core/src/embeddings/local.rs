@@ -6,7 +6,9 @@
 //!
 //! - **Default**: Nomic Embed Text v1.5 (ONNX, 768d → 256d Matryoshka, 8192 context)
 //! - **Optional**: Nomic Embed Text v2 MoE (Candle, 475M params, 305M active, 8 experts)
-//!   Enable with `nomic-v2` feature flag + `metal` for Apple Silicon acceleration.
+//!   The `nomic-v2` feature only enables the fastembed backend — model selection is not
+//!   yet implemented, so `get_model()` loads v1.5 in every configuration. See
+//!   `openclaw-vestige-c7u`.
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Mutex, OnceLock};
@@ -20,12 +22,16 @@ use std::sync::{Mutex, OnceLock};
 /// (Matryoshka Representation Learning — the first N dims ARE the N-dim representation)
 pub const EMBEDDING_DIMENSIONS: usize = 256;
 
-/// Name of the model these embeddings are produced by.
+/// Identity of the embedding model this build is *configured* for.
 ///
-/// Re-exported from [`crate::DEFAULT_EMBEDDING_MODEL`] so the embedding layer and
-/// the storage layer cannot disagree: whatever `get_model()` initializes is what
-/// gets recorded in the `model` provenance column. Pair it with
-/// [`EMBEDDING_DIMENSIONS`] whenever a stored vector is described.
+/// Re-exported from [`crate::DEFAULT_EMBEDDING_MODEL`], which is cfg-gated and
+/// reports `nomic-embed-text-v2-moe` under the `nomic-v2` feature.
+///
+/// **Do not write this into a provenance column.** `get_model()` loads v1.5 in
+/// every feature combination — the `nomic-v2` backend is not implemented — so
+/// under that feature this constant names a model that produced none of the
+/// stored vectors. Use [`EmbeddingService::model_name`] for anything that
+/// records what a vector was actually embedded with (openclaw-vestige-c7u).
 pub const EMBEDDING_MODEL_NAME: &str = crate::DEFAULT_EMBEDDING_MODEL;
 
 /// Maximum text length for embedding (truncated if longer)
@@ -48,10 +54,12 @@ fn get_cache_dir() -> std::path::PathBuf {
         return std::path::PathBuf::from(path);
     }
 
-    // Use platform-appropriate cache directory via directories crate
-    // macOS: ~/Library/Caches/com.vestige.core/fastembed
-    // Linux: ~/.cache/vestige/fastembed
-    // Windows: %LOCALAPPDATA%\vestige\cache\fastembed
+    // Use platform-appropriate cache directory via directories crate.
+    // Note the XDG path on Linux derives from the *application* name ("core"),
+    // not the organization — it is NOT ~/.cache/vestige/fastembed.
+    // macOS:   ~/Library/Caches/com.vestige.core/fastembed
+    // Linux:   ~/.cache/core/fastembed
+    // Windows: %LOCALAPPDATA%\vestige\core\cache\fastembed
     if let Some(proj_dirs) = directories::ProjectDirs::from("com", "vestige", "core") {
         return proj_dirs.cache_dir().join("fastembed");
     }
@@ -246,8 +254,15 @@ impl EmbeddingService {
     }
 
     /// Get the model name
+    ///
+    /// Unconditionally v1.5: `get_model()` only ever loads
+    /// `EmbeddingModel::NomicEmbedTextV15`, so this must not vary with the `nomic-v2`
+    /// feature. That feature enables the fastembed backend but selects no model, and this
+    /// string is written verbatim into `node_embeddings.model` /
+    /// `knowledge_nodes.embedding_model` — reporting v2-moe here would stamp a false
+    /// provenance value onto v1.5 vectors. See `openclaw-vestige-c7u`.
     pub fn model_name(&self) -> &'static str {
-        EMBEDDING_MODEL_NAME
+        "nomic-ai/nomic-embed-text-v1.5"
     }
 
     /// Get the embedding dimensions
