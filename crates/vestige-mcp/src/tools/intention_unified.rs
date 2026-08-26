@@ -152,8 +152,10 @@ struct TriggerSpec {
     #[serde(rename = "type")]
     trigger_type: Option<String>,
     at: Option<String>,
+    #[serde(alias = "in_minutes")]
     in_minutes: Option<i64>,
     codebase: Option<String>,
+    #[serde(alias = "file_pattern")]
     file_pattern: Option<String>,
     topic: Option<String>,
     condition: Option<String>,
@@ -163,6 +165,7 @@ struct TriggerSpec {
 #[serde(rename_all = "camelCase")]
 struct ContextSpec {
     #[allow(dead_code)]
+    #[serde(alias = "current_time")]
     current_time: Option<String>,
     codebase: Option<String>,
     file: Option<String>,
@@ -680,6 +683,68 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
         (Arc::new(storage), dir)
+    }
+
+    // ========================================================================
+    // SCHEMA/STRUCT SPELLING CONTRACT TESTS
+    //
+    // schema() advertises trigger.in_minutes / trigger.file_pattern /
+    // context.current_time, but TriggerSpec and ContextSpec are camelCase.
+    // ========================================================================
+
+    #[test]
+    fn test_trigger_spec_accepts_both_spellings() {
+        let snake: TriggerSpec = serde_json::from_value(serde_json::json!({
+            "type": "time",
+            "in_minutes": 30,
+            "file_pattern": "*.rs",
+        }))
+        .unwrap();
+        let camel: TriggerSpec = serde_json::from_value(serde_json::json!({
+            "type": "time",
+            "inMinutes": 30,
+            "filePattern": "*.rs",
+        }))
+        .unwrap();
+
+        assert_eq!(snake.in_minutes, Some(30));
+        assert_eq!(snake.file_pattern.as_deref(), Some("*.rs"));
+        assert_eq!(snake.in_minutes, camel.in_minutes);
+        assert_eq!(snake.file_pattern, camel.file_pattern);
+    }
+
+    /// The aliases are deserialize-only: TriggerSpec is also serialized into
+    /// `trigger_data`, and that on-disk spelling must stay camelCase.
+    #[test]
+    fn test_trigger_spec_serializes_camel_case() {
+        let spec: TriggerSpec =
+            serde_json::from_value(serde_json::json!({"type": "time", "in_minutes": 30})).unwrap();
+        let round_tripped = serde_json::to_value(&spec).unwrap();
+        assert_eq!(round_tripped["inMinutes"], 30);
+        assert!(round_tripped.get("in_minutes").is_none());
+    }
+
+    /// The NLP path writes `{"type":"time","in_minutes":N}` by hand into
+    /// trigger_data (see execute_set); check_triggered reads it back as a
+    /// TriggerSpec. Before the alias that value was silently dropped.
+    #[test]
+    fn test_nlp_written_trigger_data_reads_back() {
+        let persisted = serde_json::json!({"type": "time", "in_minutes": 45}).to_string();
+        let spec: TriggerSpec = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(spec.in_minutes, Some(45));
+    }
+
+    #[test]
+    fn test_context_spec_accepts_both_spellings() {
+        let snake: ContextSpec =
+            serde_json::from_value(serde_json::json!({"current_time": "2026-08-26T00:00:00Z"}))
+                .unwrap();
+        let camel: ContextSpec =
+            serde_json::from_value(serde_json::json!({"currentTime": "2026-08-26T00:00:00Z"}))
+                .unwrap();
+
+        assert_eq!(snake.current_time.as_deref(), Some("2026-08-26T00:00:00Z"));
+        assert_eq!(snake.current_time, camel.current_time);
     }
 
     /// Helper to create an intention and return its ID

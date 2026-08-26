@@ -59,6 +59,7 @@ struct CheckpointArgs {
 struct CheckpointItem {
     content: String,
     tags: Option<Vec<String>>,
+    #[serde(alias = "node_type")]
     node_type: Option<String>,
     source: Option<String>,
 }
@@ -364,5 +365,17 @@ mod tests {
         assert_eq!(value["success"], true); // skipped ≠ errors
         assert_eq!(value["summary"]["errors"], 0);
         assert_eq!(value["summary"]["skipped"], 2);
+    }
+
+    #[test]
+    fn test_item_accepts_both_spellings() {
+        let snake: CheckpointItem =
+            serde_json::from_value(serde_json::json!({"content": "c", "node_type": "fact"}))
+                .unwrap();
+        let camel: CheckpointItem =
+            serde_json::from_value(serde_json::json!({"content": "c", "nodeType": "fact"}))
+                .unwrap();
+        assert_eq!(snake.node_type.as_deref(), Some("fact"));
+        assert_eq!(snake.node_type, camel.node_type);
     }
 }
