@@ -47,6 +47,36 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  feature-matrix:
+    name: Feature Matrix (no vector-search)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-featurematrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-featurematrix-
+
+      # Guards against gated modules (e.g. `search`, `embeddings`) being imported
+      # unconditionally. The default job builds every feature, so such an import
+      # compiles there and only breaks the configurations exercised below.
+      - name: Check (bundled-sqlite only)
+        run: cargo check -p vestige-core --no-default-features --features bundled-sqlite
+
+      - name: Check (bundled-sqlite + embeddings, no vector-search)
+        run: cargo check -p vestige-core --no-default-features --features bundled-sqlite,embeddings
+
   dashboard:
     name: Dashboard Build
     runs-on: ubuntu-latest

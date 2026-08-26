@@ -4,9 +4,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use directories::ProjectDirs;
-use lru::LruCache;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -16,10 +14,17 @@ use crate::fsrs::{
     FSRSScheduler, FSRSState, LearningState, Rating,
 };
 use crate::memory::{
-    ConsolidationResult, EmbeddingResult, IngestInput, KnowledgeNode, MatchType, MemoryStats,
-    RecallInput, SearchMode, SearchResult, SimilarityResult,
+    ConsolidationResult, IngestInput, KnowledgeNode, MemoryStats, RecallInput, SearchMode,
 };
-use crate::search::sanitize_fts5_query;
+use crate::keyword::sanitize_fts5_query;
+
+#[cfg(feature = "embeddings")]
+use lru::LruCache;
+#[cfg(feature = "embeddings")]
+use std::num::NonZeroUsize;
+
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+use crate::memory::{EmbeddingResult, MatchType, SearchResult, SimilarityResult};
 
 #[cfg(feature = "embeddings")]
 use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};

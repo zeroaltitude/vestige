@@ -9,7 +9,6 @@
 
 mod hybrid;
 pub mod hyde;
-mod keyword;
 mod reranker;
 mod temporal;
 mod vector;
@@ -19,7 +18,9 @@ pub use vector::{
     DEFAULT_DIMENSIONS,
 };
 
-pub use keyword::{sanitize_fts5_query, KeywordSearcher};
+// Keyword search lives in `crate::keyword` so it stays available without the
+// `vector-search` feature; re-exported here to preserve `search::` paths.
+pub use crate::keyword::{sanitize_fts5_query, KeywordSearcher};
 
 pub use hybrid::{linear_combination, reciprocal_rank_fusion, HybridSearchConfig, HybridSearcher};
 
