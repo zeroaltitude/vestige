@@ -66,6 +66,31 @@ fn make_memory_with_access(
     }
 }
 
+/// Create a memory carrying an explicit embedding, at a fixed age.
+///
+/// `calculate_memory_similarity()` uses cosine similarity only when *both*
+/// memories have an embedding; otherwise it falls back to
+/// `tag_jaccard * 0.4 + content_jaccard * 0.6`, which for short prose fixtures
+/// lands around 0.2-0.3 — under `MIN_SIMILARITY_FOR_CONNECTION` (0.5). Tests
+/// that need stage 2 to actually create edges must therefore supply embeddings,
+/// which is also what production does: every stored memory has one.
+fn make_memory_with_embedding(
+    id: &str,
+    content: &str,
+    tags: Vec<&str>,
+    embedding: Vec<f32>,
+    hours_ago: i64,
+) -> DreamMemory {
+    DreamMemory {
+        id: id.to_string(),
+        content: content.to_string(),
+        embedding: Some(embedding),
+        tags: tags.into_iter().map(String::from).collect(),
+        created_at: Utc::now() - Duration::hours(hours_ago),
+        access_count: 1,
+    }
+}
+
 
 // ============================================================================
 // INSIGHT GENERATION TESTS (5 tests)
@@ -764,46 +789,150 @@ async fn test_consolidation_memory_replay_sequence() {
 async fn test_consolidation_connection_strengthening() {
     let mut scheduler = ConsolidationScheduler::new();
 
-    // Create memories with shared tags (should form connections)
+    // Three memories in one tight semantic cluster.
+    //
+    // The embeddings are load-bearing, not decoration. Stage 3 can only
+    // strengthen edges stage 2 already created, and stage 2 admits a pair only
+    // at similarity >= MIN_SIMILARITY_FOR_CONNECTION (0.5). Shared tags alone do
+    // not get there: under the tag/content fallback these three score ~0.20-0.30,
+    // so a no-embedding fixture leaves the graph empty and `stage3_strengthened`
+    // pinned at 0 — the Hebbian behaviour this test is named for never runs
+    // (openclaw-vestige-wjl).
+    //
+    // These vectors are deliberately near-parallel, so every pairwise cosine is
+    // >= 0.91 and sits well clear of the floor:
+    //   rust1 . rust2 = 1.00 / 1.09       ~= 0.917
+    //   rust1 . rust3 = 1.06 / sqrt(1.09 * 1.08) ~= 0.977
+    //   rust2 . rust3 = 1.06 / sqrt(1.09 * 1.08) ~= 0.977
+    //
+    // Ages are explicit so stage-1 replay order is deterministic
+    // (rust1 -> rust2 -> rust3) and the adjacent-pair assertions below are stable.
     let memories = vec![
-        make_memory(
+        make_memory_with_embedding(
             "rust1",
             "Rust provides memory safety without garbage collection",
             vec!["rust", "safety", "memory"],
+            vec![1.0, 0.3, 0.0],
+            3,
         ),
-        make_memory(
+        make_memory_with_embedding(
             "rust2",
             "The borrow checker ensures memory safety at compile time",
             vec!["rust", "safety", "compiler"],
+            vec![1.0, 0.0, 0.3],
+            2,
         ),
-        make_memory(
+        make_memory_with_embedding(
             "rust3",
             "Ownership rules prevent data races in Rust",
             vec!["rust", "safety", "ownership"],
+            vec![1.0, 0.2, 0.2],
+            1,
         ),
     ];
 
-    // First consolidation cycle
+    // First consolidation cycle: stage 2 builds the graph, stage 3 strengthens it.
     let first_report = scheduler.run_consolidation_cycle(&memories).await;
 
-    // Second consolidation - should strengthen existing connections
+    // Replay tests all C(3,2) = 3 pairs, and all three clear the floor.
+    assert_eq!(
+        first_report.stage2_connections, 3,
+        "stage 2 should cross-reference all three pairs, got {}",
+        first_report.stage2_connections
+    );
+
+    // The point of this test. Stage 3 walks `replay.sequence.windows(2)`, so with
+    // a 3-memory replay it must strengthen at least the 2 adjacent pairs;
+    // pattern-derived pairs add more on top.
+    assert!(
+        first_report.stage3_strengthened >= memories.len() - 1,
+        "first cycle should strengthen at least the {} adjacent replay pairs, got {}",
+        memories.len() - 1,
+        first_report.stage3_strengthened
+    );
+
+    let after_first = scheduler
+        .get_connection_stats()
+        .expect("connection stats should be available after a consolidation cycle");
+
+    // Three undirected pairs. `get_stats()` halves its edge counters because the
+    // graph stores each pair in both directions, so these are pair counts.
+    assert_eq!(
+        after_first.total_memories, 3,
+        "every fixture memory should have connections"
+    );
+    assert_eq!(
+        after_first.total_connections, 3,
+        "one edge per pair, got {}",
+        after_first.total_connections
+    );
+    assert_eq!(
+        after_first.total_created, 3,
+        "cycle 1 should have created exactly those 3 edges"
+    );
+    assert_eq!(
+        after_first.total_pruned, 0,
+        "edges this strong survive one decay pass (>= MIN_CONNECTION_STRENGTH)"
+    );
+
+    // Second consolidation over the same memories: stage 2 rediscovers the same
+    // pairs and must not mint new ones, so stage 3's strengthening has to land on
+    // the edges cycle 1 created.
     let second_report = scheduler.run_consolidation_cycle(&memories).await;
 
-    // Strengthening should occur in stage 3 - verify accessible
-    let strengthened_count = first_report.stage3_strengthened;
-    let _ = strengthened_count; // Stage 3 completed
+    assert!(
+        second_report.stage3_strengthened >= memories.len() - 1,
+        "second cycle should strengthen at least the {} adjacent replay pairs, got {}",
+        memories.len() - 1,
+        second_report.stage3_strengthened
+    );
 
-    // Connection stats should be available
-    let stats = scheduler.get_connection_stats();
-    if let Some(conn_stats) = stats {
-        // Verify stats are accessible (usize values are always >= 0)
-        let _ = conn_stats.total_memories;
+    let after_second = scheduler
+        .get_connection_stats()
+        .expect("connection stats should still be available after a second cycle");
+
+    assert_eq!(
+        after_second.total_created, after_first.total_created,
+        "second cycle should strengthen cycle 1's edges, not create new ones"
+    );
+    assert_eq!(
+        after_second.total_connections, after_first.total_connections,
+        "the edge set should be unchanged by a repeat cycle"
+    );
+    assert!(
+        after_second.average_strength > after_first.average_strength,
+        "repeated co-activation should raise average edge strength ({} -> {})",
+        after_first.average_strength,
+        after_second.average_strength
+    );
+
+    // Both cycles should complete successfully. `duration_ms` is not a usable
+    // signal here: three tiny in-memory fixtures consolidate in well under a
+    // millisecond, so it legitimately rounds to 0. What a completed cycle does
+    // guarantee is a stage-1 replay of everything it was handed plus a dream
+    // result, so assert that for both cycles.
+    for (label, report) in [("first", &first_report), ("second", &second_report)] {
+        let replay = report
+            .stage1_replay
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} cycle should record a stage-1 replay"));
+        assert_eq!(
+            replay.sequence.len(),
+            memories.len(),
+            "{label} cycle should replay every memory it was given"
+        );
+        assert!(
+            report.dream_result.is_some(),
+            "{label} cycle should record a dream result"
+        );
     }
 
-    // Both cycles should complete successfully - verify duration is tracked
+    // Ordering: the second cycle ran after the first.
     assert!(
-        first_report.duration_ms > 0 || second_report.duration_ms > 0 || true,
-        "Both consolidation cycles should complete"
+        second_report.completed_at >= first_report.completed_at,
+        "second cycle should complete no earlier than the first ({:?} vs {:?})",
+        second_report.completed_at,
+        first_report.completed_at
     );
 }
 
