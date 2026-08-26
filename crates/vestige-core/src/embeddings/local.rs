@@ -42,10 +42,12 @@ fn get_cache_dir() -> std::path::PathBuf {
         return std::path::PathBuf::from(path);
     }
 
-    // Use platform-appropriate cache directory via directories crate
-    // macOS: ~/Library/Caches/com.vestige.core/fastembed
-    // Linux: ~/.cache/vestige/fastembed
-    // Windows: %LOCALAPPDATA%\vestige\cache\fastembed
+    // Use platform-appropriate cache directory via directories crate.
+    // Note the XDG path on Linux derives from the *application* name ("core"),
+    // not the organization — it is NOT ~/.cache/vestige/fastembed.
+    // macOS:   ~/Library/Caches/com.vestige.core/fastembed
+    // Linux:   ~/.cache/core/fastembed
+    // Windows: %LOCALAPPDATA%\vestige\core\cache\fastembed
     if let Some(proj_dirs) = directories::ProjectDirs::from("com", "vestige", "core") {
         return proj_dirs.cache_dir().join("fastembed");
     }
