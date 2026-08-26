@@ -1316,9 +1316,16 @@ impl Storage {
 
     /// Get query embedding from cache or compute it
     ///
-    /// Gated with `vector-search` to match its callers (`semantic_search`,
-    /// `semantic_search_raw`, `hybrid_search`); embedding a *query* is only
-    /// useful when there is an index to search with it.
+    /// Gated on `vector-search` as well as `embeddings` to match its callers
+    /// (`semantic_search`, `semantic_search_raw`, `hybrid_search`), which are
+    /// all `all(embeddings, vector-search)`.
+    ///
+    /// This records where the code is today, not an invariant: embedding a
+    /// query does *not* require an index. A brute-force cosine scan over
+    /// `node_embeddings` would need this cache just as much, and that is the
+    /// recommended resolution of openclaw-vestige-ygv, which tracks the fact
+    /// that the embeddings-only build is currently inert. Widening this gate
+    /// back to `embeddings` is expected to be part of that work.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     fn get_query_embedding(&self, query: &str) -> Result<Vec<f32>> {
         // Check cache first
