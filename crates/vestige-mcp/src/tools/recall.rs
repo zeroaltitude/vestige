@@ -41,6 +41,7 @@ pub fn schema() -> Value {
 struct RecallArgs {
     query: String,
     limit: Option<i32>,
+    #[serde(alias = "min_retention")]
     min_retention: Option<f64>,
 }
 
@@ -396,5 +397,16 @@ mod tests {
         assert_eq!(retention_schema["minimum"], 0.0);
         assert_eq!(retention_schema["maximum"], 1.0);
         assert_eq!(retention_schema["default"], 0.0);
+    }
+
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: RecallArgs =
+            serde_json::from_value(serde_json::json!({"query": "q", "min_retention": 0.3}))
+                .unwrap();
+        let camel: RecallArgs =
+            serde_json::from_value(serde_json::json!({"query": "q", "minRetention": 0.3})).unwrap();
+        assert_eq!(snake.min_retention, Some(0.3));
+        assert_eq!(snake.min_retention, camel.min_retention);
     }
 }

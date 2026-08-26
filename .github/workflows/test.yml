@@ -9,7 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  VESTIGE_TEST_MOCK_EMBEDDINGS: "1"
+  # NOTE: there is deliberately no mock-embeddings switch here. Nothing in the
+  # tree reads one — `EmbeddingService` always initializes fastembed's
+  # nomic-embed-text-v1.5 — so any such var would only be decoration. These jobs
+  # download the ~522 MB ONNX model on first use, or silently run with
+  # embeddings disabled if that download fails (`is_ready()` swallows the error).
 
 jobs:
   unit-tests:

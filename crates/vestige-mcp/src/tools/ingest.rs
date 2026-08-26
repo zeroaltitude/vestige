@@ -49,6 +49,7 @@ pub fn schema() -> Value {
 #[serde(rename_all = "camelCase")]
 struct IngestArgs {
     content: String,
+    #[serde(alias = "node_type")]
     node_type: Option<String>,
     tags: Option<Vec<String>>,
     source: Option<String>,
@@ -430,5 +431,17 @@ mod tests {
         assert!(schema_value["properties"]["node_type"].is_object());
         assert!(schema_value["properties"]["tags"].is_object());
         assert!(schema_value["properties"]["source"].is_object());
+    }
+
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: IngestArgs =
+            serde_json::from_value(serde_json::json!({"content": "c", "node_type": "fact"}))
+                .unwrap();
+        let camel: IngestArgs =
+            serde_json::from_value(serde_json::json!({"content": "c", "nodeType": "fact"}))
+                .unwrap();
+        assert_eq!(snake.node_type.as_deref(), Some("fact"));
+        assert_eq!(snake.node_type, camel.node_type);
     }
 }
