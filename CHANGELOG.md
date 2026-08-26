@@ -30,7 +30,7 @@ The biggest release in Vestige history. A complete visual and cognitive overhaul
 #### Engine Upgrades
 - **HyDE query expansion** — template-based Hypothetical Document Embeddings: classify_intent (6 types) → expand_query (3-5 variants) → centroid_embedding. Wired into `semantic_search_raw`
 - **fastembed 5.11** — upgraded from 5.9, adds Nomic v2 MoE + Qwen3 reranker support
-- **Nomic Embed Text v2 MoE** — opt-in via `--features nomic-v2` (475M params, 305M active, 8 experts, Candle backend)
+- **Nomic Embed Text v2 MoE** — opt-in via `--features nomic-v2` (475M params, 305M active, 8 experts, Candle backend). Backend feature only — model selection is not yet implemented, so this still loads v1.5; see `openclaw-vestige-c7u`
 - **Qwen3 Reranker** — opt-in via `--features qwen3-reranker` (Candle backend, high-precision cross-encoder)
 - **Metal GPU acceleration** — opt-in via `--features metal` (Apple Silicon, significantly faster embedding inference)
 

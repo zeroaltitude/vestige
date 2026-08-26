@@ -6,7 +6,9 @@
 //!
 //! - **Default**: Nomic Embed Text v1.5 (ONNX, 768d → 256d Matryoshka, 8192 context)
 //! - **Optional**: Nomic Embed Text v2 MoE (Candle, 475M params, 305M active, 8 experts)
-//!   Enable with `nomic-v2` feature flag + `metal` for Apple Silicon acceleration.
+//!   The `nomic-v2` feature only enables the fastembed backend — model selection is not
+//!   yet implemented, so `get_model()` loads v1.5 in every configuration. See
+//!   `openclaw-vestige-c7u`.
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Mutex, OnceLock};
@@ -238,11 +240,15 @@ impl EmbeddingService {
     }
 
     /// Get the model name
+    ///
+    /// Unconditionally v1.5: `get_model()` only ever loads
+    /// `EmbeddingModel::NomicEmbedTextV15`, so this must not vary with the `nomic-v2`
+    /// feature. That feature enables the fastembed backend but selects no model, and this
+    /// string is written verbatim into `node_embeddings.model` /
+    /// `knowledge_nodes.embedding_model` — reporting v2-moe here would stamp a false
+    /// provenance value onto v1.5 vectors. See `openclaw-vestige-c7u`.
     pub fn model_name(&self) -> &'static str {
-        #[cfg(feature = "nomic-v2")]
-        { "nomic-ai/nomic-embed-text-v2-moe" }
-        #[cfg(not(feature = "nomic-v2"))]
-        { "nomic-ai/nomic-embed-text-v1.5" }
+        "nomic-ai/nomic-embed-text-v1.5"
     }
 
     /// Get the embedding dimensions

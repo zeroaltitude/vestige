@@ -29,6 +29,8 @@ vector-search = ["dep:usearch"]
 
 # Nomic Embed Text v2 MoE (475M params, 305M active, Candle backend)
 # Requires: fastembed with nomic-v2-moe feature
+# NOTE: backend feature only — model selection is not yet implemented, so this still
+# loads nomic-embed-text-v1.5. See openclaw-vestige-c7u.
 nomic-v2 = ["embeddings", "fastembed/nomic-v2-moe"]
 
 # Qwen3 Reranker (Candle backend, high-precision cross-encoder)

@@ -287,6 +287,8 @@ At the start of every session:
 cargo build --release -p vestige-mcp --features metal
 
 # Nomic Embed Text v2 MoE (475M params, 305M active, 8 experts)
+# Backend feature only — model selection is not yet implemented, so this build still
+# loads nomic-embed-text-v1.5. See openclaw-vestige-c7u.
 cargo build --release -p vestige-mcp --features nomic-v2
 
 # Qwen3 Reranker (Candle backend, high-precision cross-encoder)
