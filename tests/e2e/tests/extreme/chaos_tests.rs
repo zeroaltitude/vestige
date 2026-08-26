@@ -449,10 +449,30 @@ fn test_chaos_ancient_memories() {
     let event = ImportanceEvent::user_flag("trigger", Some("Ancient memory test"));
     let result = stc.trigger_prp(event);
 
-    // System should handle this gracefully
+    // All three tags were created moments before the trigger and start at full
+    // strength, so each one sits inside the 9h backward window, clears the 0.1
+    // min_tag_strength floor, and scores above the capture threshold. The
+    // full-strength UserFlag (1.0) also clears the 0.5 prp_threshold, so the
+    // sweep actually runs. None of this is random: capture probability is a
+    // deterministic function of temporal distance.
+    assert_eq!(
+        result.considered_count, 3,
+        "All three tags should be inside the capture window"
+    );
+    let mut captured: Vec<&str> = result
+        .captured_memories
+        .iter()
+        .map(|m| m.memory_id.as_str())
+        .collect();
+    captured.sort_unstable();
+    assert_eq!(
+        captured,
+        vec!["old", "recent", "very_old"],
+        "Importance triggering should capture every eligible tagged memory"
+    );
     assert!(
-        result.captured_count() >= 0,
-        "System should handle importance triggering"
+        result.cluster.is_some(),
+        "Clustering is enabled and captures are non-empty, so a cluster should form"
     );
 
     // All memories should be accessible
