@@ -82,10 +82,13 @@ pub fn schema() -> Value {
 struct SearchArgs {
     query: String,
     limit: Option<i32>,
+    #[serde(alias = "min_retention")]
     min_retention: Option<f64>,
+    #[serde(alias = "min_similarity")]
     min_similarity: Option<f32>,
     #[serde(alias = "detail_level")]
     detail_level: Option<String>,
+    #[serde(alias = "context_topics")]
     context_topics: Option<Vec<String>>,
     #[serde(alias = "token_budget")]
     token_budget: Option<i32>,
@@ -877,6 +880,74 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("query")));
+    }
+
+    // ========================================================================
+    // SCHEMA/STRUCT SPELLING CONTRACT TESTS
+    //
+    // schema() publishes snake_case property names but SearchArgs is
+    // rename_all = "camelCase". Without #[serde(alias)] the advertised spelling
+    // deserializes to None and is silently dropped (no deny_unknown_fields).
+    // ========================================================================
+
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "q",
+            "min_retention": 0.5,
+            "min_similarity": 0.99,
+            "detail_level": "full",
+            "context_topics": ["a"],
+            "token_budget": 200,
+        }))
+        .unwrap();
+        let camel: SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "q",
+            "minRetention": 0.5,
+            "minSimilarity": 0.99,
+            "detailLevel": "full",
+            "contextTopics": ["a"],
+            "tokenBudget": 200,
+        }))
+        .unwrap();
+
+        assert_eq!(snake.min_retention, Some(0.5));
+        assert_eq!(snake.min_similarity, Some(0.99));
+        assert_eq!(snake.detail_level.as_deref(), Some("full"));
+        assert_eq!(snake.context_topics, Some(vec!["a".to_string()]));
+        assert_eq!(snake.token_budget, Some(200));
+
+        assert_eq!(snake.min_retention, camel.min_retention);
+        assert_eq!(snake.min_similarity, camel.min_similarity);
+        assert_eq!(snake.detail_level, camel.detail_level);
+        assert_eq!(snake.context_topics, camel.context_topics);
+        assert_eq!(snake.token_budget, camel.token_budget);
+    }
+
+    /// Every property the schema advertises must actually reach the struct.
+    #[test]
+    fn test_every_advertised_property_deserializes() {
+        let mut payload = serde_json::json!({"query": "q"});
+        for (name, spec) in schema()["properties"].as_object().unwrap() {
+            if name == "query" {
+                continue;
+            }
+            let sample = match spec["type"].as_str().unwrap() {
+                "number" => serde_json::json!(0.5),
+                "integer" => serde_json::json!(3),
+                "string" => serde_json::json!("full"),
+                "array" => serde_json::json!(["a"]),
+                other => panic!("unhandled schema type {other} for {name}"),
+            };
+            payload[name] = sample;
+        }
+        let args: SearchArgs = serde_json::from_value(payload).unwrap();
+        assert!(args.min_retention.is_some(), "min_retention was dropped");
+        assert!(args.min_similarity.is_some(), "min_similarity was dropped");
+        assert!(args.detail_level.is_some(), "detail_level was dropped");
+        assert!(args.context_topics.is_some(), "context_topics was dropped");
+        assert!(args.token_budget.is_some(), "token_budget was dropped");
+        assert!(args.limit.is_some(), "limit was dropped");
     }
 
     #[test]

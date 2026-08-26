@@ -582,7 +582,7 @@ impl UserModel {
         }
 
         // Sort by count and keep top patterns
-        patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        patterns.sort_by_key(|a| std::cmp::Reverse(a.1));
         patterns.truncate(50);
     }
 
@@ -915,11 +915,7 @@ impl PredictiveMemory {
         predictions.retain(|p| p.confidence >= self.config.min_confidence);
 
         // Sort by confidence
-        predictions.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        predictions.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
 
         // Truncate to max
         predictions.truncate(self.config.max_predictions);

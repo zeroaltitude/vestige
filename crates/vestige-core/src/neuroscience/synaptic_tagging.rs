@@ -122,6 +122,7 @@ pub enum DecayFunction {
     Logarithmic,
 }
 
+
 impl DecayFunction {
     /// Calculate decayed strength
     ///

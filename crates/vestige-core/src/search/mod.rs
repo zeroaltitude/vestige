@@ -9,27 +9,28 @@
 
 mod hybrid;
 pub mod hyde;
-mod keyword;
 mod reranker;
 mod temporal;
 mod vector;
 
 pub use vector::{
-    DEFAULT_CONNECTIVITY, DEFAULT_DIMENSIONS, VectorIndex, VectorIndexConfig, VectorIndexStats,
-    VectorSearchError,
+    VectorIndex, VectorIndexConfig, VectorIndexStats, VectorSearchError, DEFAULT_CONNECTIVITY,
+    DEFAULT_DIMENSIONS,
 };
 
-pub use keyword::{KeywordSearcher, sanitize_fts5_query};
+// Keyword search lives in `crate::keyword` so it stays available without the
+// `vector-search` feature; re-exported here to preserve `search::` paths.
+pub use crate::keyword::{sanitize_fts5_query, KeywordSearcher};
 
-pub use hybrid::{HybridSearchConfig, HybridSearcher, linear_combination, reciprocal_rank_fusion};
+pub use hybrid::{linear_combination, reciprocal_rank_fusion, HybridSearchConfig, HybridSearcher};
 
 pub use temporal::TemporalSearcher;
 
 // GOD TIER 2026: Reranking for +15-20% precision
 pub use reranker::{
-    DEFAULT_RERANK_COUNT, DEFAULT_RETRIEVAL_COUNT, RerankedResult, Reranker, RerankerConfig,
-    RerankerError,
+    Reranker, RerankerConfig, RerankerError, RerankedResult,
+    DEFAULT_RERANK_COUNT, DEFAULT_RETRIEVAL_COUNT,
 };
 
 // v2.0: HyDE-inspired query expansion for improved semantic search
-pub use hyde::{QueryIntent, centroid_embedding, classify_intent, expand_query};
+pub use hyde::{classify_intent, expand_query, centroid_embedding, QueryIntent};

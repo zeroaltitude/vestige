@@ -990,11 +990,7 @@ impl ContextMatcher {
             .collect();
 
         // Sort by combined score (descending)
-        scored.sort_by(|a, b| {
-            b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap_or(std::cmp::Ordering::Equal));
 
         scored
     }
@@ -1112,11 +1108,9 @@ mod tests {
         topical.add_topic("security");
         topical.extract_keywords_from("implementing OAuth2 authentication flow");
 
-        assert!(
-            topical
-                .active_topics
-                .contains(&"authentication".to_string())
-        );
+        assert!(topical
+            .active_topics
+            .contains(&"authentication".to_string()));
         assert!(topical.keywords.contains(&"oauth2".to_string()));
 
         let terms = topical.all_terms();
@@ -1129,11 +1123,10 @@ mod tests {
         ctx.add_topic("api-design");
         ctx.set_project("vestige");
 
-        assert!(
-            ctx.topical
-                .active_topics
-                .contains(&"api-design".to_string())
-        );
+        assert!(ctx
+            .topical
+            .active_topics
+            .contains(&"api-design".to_string()));
         assert_eq!(ctx.session.project, Some("vestige".to_string()));
     }
 
@@ -1149,11 +1142,7 @@ mod tests {
         let ctx2 = ctx1.clone();
 
         let similarity = matcher.match_contexts(&ctx1, &ctx2);
-        assert!(
-            similarity > 0.8,
-            "Same context should have high similarity, got {}",
-            similarity
-        );
+        assert!(similarity > 0.8, "Same context should have high similarity, got {}", similarity);
     }
 
     #[test]

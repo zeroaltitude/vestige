@@ -300,11 +300,7 @@ impl MemoryChainBuilder {
         }
 
         // Sort by score (descending)
-        all_paths.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        all_paths.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         // Return top paths
         all_paths.into_iter().take(10).collect()
@@ -333,7 +329,7 @@ impl MemoryChainBuilder {
 
         // Sort by frequency
         let mut bridge_list: Vec<_> = bridges.into_iter().collect();
-        bridge_list.sort_by(|a, b| b.1.cmp(&a.1));
+        bridge_list.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         bridge_list.into_iter().map(|(id, _)| id).collect()
     }

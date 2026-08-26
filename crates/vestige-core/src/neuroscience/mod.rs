@@ -94,23 +94,15 @@ pub use context_memory::{
 
 // Memory states (accessibility continuum)
 pub use memory_states::{
-    // Constants
-    ACCESSIBILITY_ACTIVE,
-    ACCESSIBILITY_DORMANT,
-    ACCESSIBILITY_SILENT,
-    ACCESSIBILITY_UNAVAILABLE,
     // Accessibility scoring
     AccessibilityCalculator,
     BatchUpdateResult,
-    COMPETITION_SIMILARITY_THRESHOLD,
     CompetitionCandidate,
     CompetitionConfig,
     CompetitionEvent,
     // Competition system (Retrieval-Induced Forgetting)
     CompetitionManager,
     CompetitionResult,
-    DEFAULT_ACTIVE_DECAY_HOURS,
-    DEFAULT_DORMANT_DECAY_DAYS,
     LifecycleSummary,
     MemoryLifecycle,
     // Core types
@@ -124,6 +116,14 @@ pub use memory_states::{
     StateTransitionReason,
     // State management
     StateUpdateService,
+    // Constants
+    ACCESSIBILITY_ACTIVE,
+    ACCESSIBILITY_DORMANT,
+    ACCESSIBILITY_SILENT,
+    ACCESSIBILITY_UNAVAILABLE,
+    COMPETITION_SIMILARITY_THRESHOLD,
+    DEFAULT_ACTIVE_DECAY_HOURS,
+    DEFAULT_DORMANT_DECAY_DAYS,
 };
 
 // Multi-channel importance signaling (Neuromodulator-inspired)
@@ -174,8 +174,6 @@ pub use hippocampal_index::{
     HippocampalIndex,
     HippocampalIndexConfig,
     HippocampalIndexError,
-    // Constants
-    INDEX_EMBEDDING_DIM,
     ImportanceFlags,
     IndexLink,
     IndexMatch,
@@ -189,39 +187,40 @@ pub use hippocampal_index::{
     MigrationResult,
     StorageLocation,
     TemporalMarker,
+    // Constants
+    INDEX_EMBEDDING_DIM,
 };
 
 // Predictive memory retrieval (Free Energy Principle - Friston, 2010)
 pub use predictive_retrieval::{
     // Backward-compatible aliases
     ContextualPredictor,
-    // Enhanced types (Friston's Active Inference)
-    PredictedMemory,
     Prediction,
     PredictionConfidence,
+    PredictiveConfig,
+    PredictiveRetriever,
+    SequencePredictor,
+    TemporalPredictor,
+    // Enhanced types (Friston's Active Inference)
+    PredictedMemory,
     PredictionOutcome,
     PredictionReason,
-    PredictiveConfig,
     PredictiveMemory,
     PredictiveMemoryConfig,
     PredictiveMemoryError,
-    PredictiveRetriever,
     ProjectContext as PredictiveProjectContext,
     QueryPattern,
-    SequencePredictor,
     SessionContext as PredictiveSessionContext,
     TemporalPatterns,
-    TemporalPredictor,
     UserModel,
 };
 
 // Prospective memory (Einstein & McDaniel, 1990)
 pub use prospective_memory::{
-    // Context monitoring
-    Context as ProspectiveContext,
-    ContextMonitor,
-    // Triggers and patterns
-    ContextPattern,
+    // Core engine
+    ProspectiveMemory,
+    ProspectiveMemoryConfig,
+    ProspectiveMemoryError,
     // Intentions
     Intention,
     IntentionParser,
@@ -230,12 +229,13 @@ pub use prospective_memory::{
     IntentionStatus,
     IntentionTrigger,
     Priority,
-    // Core engine
-    ProspectiveMemory,
-    ProspectiveMemoryConfig,
-    ProspectiveMemoryError,
+    // Triggers and patterns
+    ContextPattern,
     RecurrencePattern,
     TriggerPattern,
+    // Context monitoring
+    Context as ProspectiveContext,
+    ContextMonitor,
 };
 
 // Spreading activation (Associative Memory Network - Collins & Loftus, 1975)

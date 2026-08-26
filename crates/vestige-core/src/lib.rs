@@ -82,6 +82,11 @@
 
 pub mod consolidation;
 pub mod fsrs;
+/// Keyword (BM25/FTS5) search helpers, including FTS5 query sanitization.
+///
+/// Ungated: `storage` issues FTS5 queries in every configuration, so this must
+/// build without the `vector-search` feature. Also re-exported from `search`.
+pub mod keyword;
 pub mod memory;
 pub mod storage;
 
@@ -113,27 +118,20 @@ pub mod neuroscience;
 
 // Memory types
 pub use memory::{
-    ConsolidationResult,
+    ConsolidationResult, EmbeddingResult, IngestInput, KnowledgeNode, MatchType, MemoryStats,
+    NodeType, RecallInput, SearchMode, SearchResult, SimilarityResult, TemporalRange,
     // GOD TIER 2026: New types
-    EdgeType,
-    EmbeddingResult,
-    IngestInput,
-    KnowledgeEdge,
-    KnowledgeNode,
-    MatchType,
-    MemoryScope,
-    MemoryStats,
-    MemorySystem,
-    NodeType,
-    RecallInput,
-    SearchMode,
-    SearchResult,
-    SimilarityResult,
-    TemporalRange,
+    EdgeType, KnowledgeEdge, MemoryScope, MemorySystem,
 };
 
 // FSRS-6 algorithm
 pub use fsrs::{
+    initial_difficulty,
+    initial_stability,
+    next_interval,
+    // Core functions for advanced usage
+    retrievability,
+    retrievability_with_decay,
     FSRSParameters,
     FSRSScheduler,
     FSRSState,
@@ -141,12 +139,6 @@ pub use fsrs::{
     PreviewResults,
     Rating,
     ReviewResult,
-    initial_difficulty,
-    initial_stability,
-    next_interval,
-    // Core functions for advanced usage
-    retrievability,
-    retrievability_with_decay,
 };
 
 // Storage layer
@@ -158,8 +150,9 @@ pub use storage::{
 // Consolidation (sleep-inspired memory processing)
 pub use consolidation::SleepConsolidation;
 pub use consolidation::{
-    CreativeConnection, CreativeConnectionType, DreamEngine, DreamInsight, DreamPhase,
-    FourPhaseDreamResult, PhaseResult, TriageCategory, TriagedMemory,
+    DreamEngine, DreamPhase, FourPhaseDreamResult, PhaseResult,
+    TriagedMemory, TriageCategory, CreativeConnection, CreativeConnectionType,
+    DreamInsight,
 };
 
 // Advanced features (bleeding edge 2026)
@@ -173,8 +166,6 @@ pub use advanced::{
     AdaptiveEmbedder,
     ApplicableKnowledge,
     AppliedModification,
-    // Prediction Error Gating (solves bad vs good similar memory problem)
-    CandidateMemory,
     ChainStep,
     ChangeSummary,
     CompressedMemory,
@@ -188,20 +179,16 @@ pub use advanced::{
     // Sleep consolidation (automatic background consolidation)
     ConsolidationScheduler,
     ContentType,
-    CreateReason,
     // Cross-project learning
     CrossProjectLearner,
     DetectedIntent,
-    DiscoveredConnection,
-    DiscoveredConnectionType,
     DreamConfig,
     // DreamMemory - input type for dreaming
     DreamMemory,
+    DiscoveredConnection,
+    DiscoveredConnectionType,
     DreamResult,
     EmbeddingStrategy,
-    EvaluationIntent,
-    GateDecision,
-    GateStats,
     ImportanceDecayConfig,
     ImportanceScore,
     // Importance tracking
@@ -221,14 +208,11 @@ pub use advanced::{
     MemoryPath,
     MemoryReplay,
     MemorySnapshot,
-    MergeStrategy,
     Modification,
     Pattern,
     PatternType,
     PredictedMemory,
     PredictionContext,
-    PredictionErrorConfig,
-    PredictionErrorGate,
     ProjectContext,
     ReasoningChain,
     ReconsolidatedMemory,
@@ -237,16 +221,25 @@ pub use advanced::{
     ReconsolidationStats,
     RelationshipType,
     RetrievalRecord,
-    SimilarityResult as PredictionSimilarityResult,
     // Speculative retrieval
     SpeculativeRetriever,
-    SupersedeReason,
     SynthesizedInsight,
     UniversalPattern,
-    UpdateType,
     UsageEvent,
     UsagePattern,
     UserAction,
+    // Prediction Error Gating (solves bad vs good similar memory problem)
+    CandidateMemory,
+    CreateReason,
+    EvaluationIntent,
+    GateDecision,
+    GateStats,
+    MergeStrategy,
+    PredictionErrorConfig,
+    PredictionErrorGate,
+    SimilarityResult as PredictionSimilarityResult,
+    SupersedeReason,
+    UpdateType,
 };
 
 // Codebase memory (Vestige's killer differentiator)
@@ -326,20 +319,14 @@ pub use neuroscience::{
     ContextReinstatement,
     ContextWeights,
     DecayFunction,
-    // Emotional Memory (Brown & Kulik 1977, Bower 1981, LaBar & Cabeza 2006)
-    EmotionCategory,
     EmotionalContext,
-    EmotionalEvaluation,
     EmotionalMarker,
-    EmotionalMemory,
-    EmotionalMemoryStats,
     EncodingContext,
     FullMemory,
     // Hippocampal Indexing (Teyler & Rudy, 2007)
     HippocampalIndex,
     HippocampalIndexConfig,
     HippocampalIndexError,
-    INDEX_EMBEDDING_DIM,
     ImportanceCluster,
     ImportanceConsolidationConfig,
     ImportanceEncodingConfig,
@@ -391,34 +378,41 @@ pub use neuroscience::{
     TemporalMarker,
     TimeOfDay,
     TopicalContext,
+    INDEX_EMBEDDING_DIM,
+    // Emotional Memory (Brown & Kulik 1977, Bower 1981, LaBar & Cabeza 2006)
+    EmotionCategory,
+    EmotionalEvaluation,
+    EmotionalMemory,
+    EmotionalMemoryStats,
 };
 
 // Embeddings (when feature enabled)
 #[cfg(feature = "embeddings")]
 pub use embeddings::{
-    EMBEDDING_DIMENSIONS, Embedding, EmbeddingError, EmbeddingService, cosine_similarity,
-    euclidean_distance,
+    cosine_similarity, euclidean_distance, Embedding, EmbeddingError, EmbeddingService,
+    EMBEDDING_DIMENSIONS,
 };
+
+// Keyword search (always available - FTS5 does not depend on vector-search)
+pub use keyword::{sanitize_fts5_query, KeywordSearcher};
 
 // Search (when feature enabled)
 #[cfg(feature = "vector-search")]
 pub use search::{
+    linear_combination,
+    reciprocal_rank_fusion,
     HybridSearchConfig,
     // Hybrid search
     HybridSearcher,
-    // Keyword search
-    KeywordSearcher,
-    RerankedResult,
-    // GOD TIER 2026: Reranking
-    Reranker,
-    RerankerConfig,
-    RerankerError,
     VectorIndex,
     VectorIndexConfig,
     VectorIndexStats,
     VectorSearchError,
-    linear_combination,
-    reciprocal_rank_fusion,
+    // GOD TIER 2026: Reranking
+    Reranker,
+    RerankerConfig,
+    RerankerError,
+    RerankedResult,
 };
 
 // ============================================================================
@@ -461,8 +455,6 @@ pub mod prelude {
         // Sleep consolidation
         ConsolidationScheduler,
         CrossProjectLearner,
-        EvaluationIntent,
-        GateDecision,
         ImportanceTracker,
         IntentDetector,
         LabileState,
@@ -472,12 +464,14 @@ pub mod prelude {
         MemoryReplay,
         Modification,
         PredictedMemory,
-        // Prediction Error Gating
-        PredictionErrorGate,
         ReconsolidatedMemory,
         // Reconsolidation
         ReconsolidationManager,
         SpeculativeRetriever,
+        // Prediction Error Gating
+        PredictionErrorGate,
+        GateDecision,
+        EvaluationIntent,
     };
 
     // Codebase memory

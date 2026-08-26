@@ -531,14 +531,14 @@ pub async fn trigger_dream(
 
     // Run dream through CognitiveEngine
     let cog = cognitive.lock().await;
-    let pre_dream_count = cog.dreamer.get_connections().len();
     let dream_result = cog.dreamer.dream(&dream_memories).await;
     let insights = cog.dreamer.synthesize_insights(&dream_memories);
-    let all_connections = cog.dreamer.get_connections();
     drop(cog);
 
-    // Persist new connections
-    let new_connections = &all_connections[pre_dream_count..];
+    // Persist the connections this dream discovered. Same caveat as the MCP dream
+    // tool: never diff dreamer.get_connections() by index — it is capped at the
+    // last 1000 connections, so the diff empties out once saturated.
+    let new_connections = &dream_result.discovered_connections;
     let mut connections_persisted = 0u64;
     let now = Utc::now();
     for conn in new_connections {
@@ -800,9 +800,10 @@ pub async fn trigger_consolidation(
 
     let start = std::time::Instant::now();
 
-    let result = state
-        .storage
-        .run_consolidation()
+    let storage = state.storage.clone();
+    let result = tokio::task::spawn_blocking(move || storage.run_consolidation())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let duration_ms = start.elapsed().as_millis() as u64;

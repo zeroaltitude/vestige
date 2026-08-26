@@ -130,7 +130,8 @@ pub type Result<T> = std::result::Result<T, ProspectiveMemoryError>;
 // ============================================================================
 
 /// Priority levels for intentions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Priority {
     /// Low priority - nice to remember
     Low = 1,
@@ -142,6 +143,7 @@ pub enum Priority {
     /// Critical priority - must not forget
     Critical = 4,
 }
+
 
 impl Priority {
     /// Get numeric value for comparison
@@ -176,7 +178,8 @@ impl Priority {
 }
 
 /// Status of an intention
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum IntentionStatus {
     /// Intention is active and being monitored
     #[default]
@@ -192,6 +195,7 @@ pub enum IntentionStatus {
     /// Intention is snoozed until a specific time
     Snoozed,
 }
+
 
 /// Pattern for matching trigger conditions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -954,17 +958,9 @@ impl IntentionParser {
             let when_char_idx = text_lower[..when_byte_idx].chars().count();
 
             let content_part: String = if text_lower.starts_with("remind me to ") {
-                original
-                    .chars()
-                    .skip(13)
-                    .take(when_char_idx.saturating_sub(13))
-                    .collect()
+                original.chars().skip(13).take(when_char_idx.saturating_sub(13)).collect()
             } else if text_lower.starts_with("remind me ") {
-                original
-                    .chars()
-                    .skip(10)
-                    .take(when_char_idx.saturating_sub(10))
-                    .collect()
+                original.chars().skip(10).take(when_char_idx.saturating_sub(10)).collect()
             } else {
                 original.chars().take(when_char_idx).collect()
             };
@@ -1053,6 +1049,8 @@ impl IntentionParser {
 
     /// Extract content from text, removing trigger keywords
     fn extract_content(&self, _text_lower: &str, original: &str, keyword: &str) -> String {
+        
+
         original
             .replace(keyword, "")
             .replace(&keyword.to_uppercase(), "")
@@ -1283,11 +1281,10 @@ impl ProspectiveMemory {
             if intention
                 .trigger
                 .is_triggered(context, &context.recent_events)
-                && intention.should_remind()
-            {
-                intention.mark_triggered();
-                triggered.push(intention.clone());
-            }
+                && intention.should_remind() {
+                    intention.mark_triggered();
+                    triggered.push(intention.clone());
+                }
 
             // Check for deadline escalation
             if self.config.enable_escalation {

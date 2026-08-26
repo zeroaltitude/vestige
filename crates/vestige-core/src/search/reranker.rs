@@ -163,9 +163,7 @@ impl Reranker {
         top_k: Option<usize>,
     ) -> Result<Vec<RerankedResult<T>>, RerankerError> {
         if query.is_empty() {
-            return Err(RerankerError::InvalidInput(
-                "Query cannot be empty".to_string(),
-            ));
+            return Err(RerankerError::InvalidInput("Query cannot be empty".to_string()));
         }
 
         if candidates.is_empty() {
@@ -192,9 +190,7 @@ impl Reranker {
                     .collect();
 
                 results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
                 });
 
                 if let Some(min_score) = self.config.min_score {
@@ -221,11 +217,7 @@ impl Reranker {
             })
             .collect();
 
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some(min_score) = self.config.min_score {
             results.retain(|r| r.score >= min_score);

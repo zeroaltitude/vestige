@@ -299,6 +299,7 @@ pub struct ConsolidationResult {
     pub w20_optimized: Option<f64>,
 }
 
+
 // ============================================================================
 // SEARCH RESULTS
 // ============================================================================
@@ -359,3 +360,4 @@ pub struct EmbeddingResult {
     /// Error messages for failures
     pub errors: Vec<String>,
 }
+

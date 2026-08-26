@@ -2,6 +2,12 @@
 //!
 //! Provides keyword-based search using SQLite FTS5.
 //! Includes query sanitization for security.
+//!
+//! This module is deliberately **not** gated behind the `vector-search` feature:
+//! FTS5 queries are issued by [`crate::storage`] on every build, so the sanitizer
+//! must be available even when HNSW vector search is compiled out. It is
+//! re-exported from [`crate::search`] when that feature is enabled so the
+//! `vestige_core::search::sanitize_fts5_query` path keeps working.
 
 // ============================================================================
 // FTS5 QUERY SANITIZATION
@@ -49,10 +55,7 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         let end_pattern = format!(" {}", op);
         if upper.ends_with(&end_pattern) {
             let char_count = sanitized.chars().count();
-            sanitized = sanitized
-                .chars()
-                .take(char_count.saturating_sub(op.len()))
-                .collect();
+            sanitized = sanitized.chars().take(char_count.saturating_sub(op.len())).collect();
         }
     }
 
@@ -64,10 +67,11 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         return "\"\"".to_string(); // Empty phrase - matches nothing safely
     }
 
-    // Wrap each remaining token as its own phrase so multi-word queries
-    // become an implicit AND of single-term matches, not a phrase search.
-    // This ensures FTS5 scores each term independently via BM25 rather than
-    // requiring the exact multi-word phrase to appear consecutively.
+    // Wrap each remaining token as its own phrase so multi-word queries become an
+    // implicit AND of single-term matches rather than one consecutive phrase. FTS5
+    // then scores each term independently via BM25; the old single-phrase form
+    // required every word to appear adjacently, so ordinary multi-word searches
+    // returned nothing (openclaw-vestige-6ct).
     let tokens: Vec<String> = sanitized
         .split_whitespace()
         .filter(|t| !t.is_empty())
@@ -215,30 +219,39 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_basic() {
-        // Multi-word query: each token is individually quoted (implicit AND, not phrase)
+        // Each token is quoted individually, giving FTS5 an implicit AND of terms
+        // rather than one consecutive phrase.
         assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" \"world\"");
+        assert_eq!(sanitize_fts5_query("hello"), "\"hello\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_operators() {
-        // Boolean operators are stripped; remaining tokens individually quoted
+        // Boolean operators are stripped; the remaining tokens stay individually quoted.
         assert_eq!(sanitize_fts5_query("hello OR world"), "\"hello\" \"world\"");
-        assert_eq!(
-            sanitize_fts5_query("hello AND world"),
-            "\"hello\" \"world\""
-        );
+        assert_eq!(sanitize_fts5_query("hello AND world"), "\"hello\" \"world\"");
         assert_eq!(sanitize_fts5_query("NOT hello"), "\"hello\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_special_chars() {
-        // Special chars stripped; remaining tokens individually quoted
+        // Special characters are stripped; the remaining tokens stay individually quoted.
         assert_eq!(sanitize_fts5_query("hello* world"), "\"hello\" \"world\"");
         assert_eq!(
             sanitize_fts5_query("content:secret"),
             "\"content\" \"secret\""
         );
         assert_eq!(sanitize_fts5_query("^boost"), "\"boost\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_multi_word_is_implicit_and() {
+        // The bug this guards (openclaw-vestige-6ct): a multi-word query must NOT
+        // collapse into a single quoted phrase, which FTS5 only matches when the
+        // words appear consecutively — so an ordinary search returned nothing.
+        let result = sanitize_fts5_query("tell me about Reccy");
+        assert_eq!(result, "\"tell\" \"me\" \"about\" \"Reccy\"");
+        assert_ne!(result, "\"tell me about Reccy\"");
     }
 
     #[test]
@@ -250,22 +263,9 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_length_limit() {
-        // 2000 'a' chars → capped at 1000 → one token → "a"*1000 in quotes = 1002 chars
         let long_query = "a".repeat(2000);
         let sanitized = sanitize_fts5_query(&long_query);
-        // Single token of 1000 chars → "<1000 a's>" = 1002 chars
-        assert!(sanitized.len() <= 1010);
-    }
-
-    #[test]
-    fn test_sanitize_fts5_query_multi_word_is_implicit_and() {
-        // The bug: multi-word queries must NOT produce a single quoted phrase.
-        // Each token should be wrapped individually so FTS5 treats them as
-        // implicit AND (term matches) rather than a consecutive phrase.
-        let result = sanitize_fts5_query("tell me about Reccy");
-        assert_eq!(result, "\"tell\" \"me\" \"about\" \"Reccy\"");
-        // Must NOT be the old single-phrase format:
-        assert_ne!(result, "\"tell me about Reccy\"");
+        assert!(sanitized.len() <= 1004);
     }
 
     #[test]

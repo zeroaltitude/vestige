@@ -222,11 +222,7 @@ impl PatternDetector {
         }
 
         // Sort by confidence
-        matches.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(matches)
     }
@@ -330,11 +326,7 @@ impl PatternDetector {
         }
 
         // Sort by relevance
-        suggestions.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        suggestions.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(suggestions)
     }
@@ -449,7 +441,7 @@ impl PatternDetector {
     pub fn delete_pattern(&mut self, pattern_id: &str) -> Result<()> {
         if self.patterns.remove(pattern_id).is_some() {
             // Clean up indexes
-            for (_, ids) in self.patterns_by_language.iter_mut() {
+            for ids in self.patterns_by_language.values_mut() {
                 ids.retain(|id| id != pattern_id);
             }
             self.pattern_keywords.remove(pattern_id);

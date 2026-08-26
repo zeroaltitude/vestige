@@ -76,6 +76,7 @@ pub fn hybrid_schema() -> Value {
 struct SemanticSearchArgs {
     query: String,
     limit: Option<i32>,
+    #[serde(alias = "min_similarity")]
     min_similarity: Option<f32>,
 }
 
@@ -84,7 +85,9 @@ struct SemanticSearchArgs {
 struct HybridSearchArgs {
     query: String,
     limit: Option<i32>,
+    #[serde(alias = "keyword_weight")]
     keyword_weight: Option<f32>,
+    #[serde(alias = "semantic_weight")]
     semantic_weight: Option<f32>,
 }
 
@@ -186,4 +189,36 @@ pub async fn execute_hybrid(
         "total": formatted.len(),
         "results": formatted,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// semantic_schema()/hybrid_schema() advertise snake_case names, but the arg
+    /// structs are camelCase. Both spellings must reach the same fields.
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: SemanticSearchArgs =
+            serde_json::from_value(serde_json::json!({"query": "q", "min_similarity": 0.7}))
+                .unwrap();
+        let camel: SemanticSearchArgs =
+            serde_json::from_value(serde_json::json!({"query": "q", "minSimilarity": 0.7}))
+                .unwrap();
+        assert_eq!(snake.min_similarity, Some(0.7));
+        assert_eq!(snake.min_similarity, camel.min_similarity);
+
+        let h_snake: HybridSearchArgs = serde_json::from_value(
+            serde_json::json!({"query": "q", "keyword_weight": 0.4, "semantic_weight": 0.6}),
+        )
+        .unwrap();
+        let h_camel: HybridSearchArgs = serde_json::from_value(
+            serde_json::json!({"query": "q", "keywordWeight": 0.4, "semanticWeight": 0.6}),
+        )
+        .unwrap();
+        assert_eq!(h_snake.keyword_weight, Some(0.4));
+        assert_eq!(h_snake.semantic_weight, Some(0.6));
+        assert_eq!(h_snake.keyword_weight, h_camel.keyword_weight);
+        assert_eq!(h_snake.semantic_weight, h_camel.semantic_weight);
+    }
 }

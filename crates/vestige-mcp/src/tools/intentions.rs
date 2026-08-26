@@ -166,8 +166,10 @@ struct TriggerSpec {
     #[serde(rename = "type")]
     trigger_type: Option<String>,
     at: Option<String>,
+    #[serde(alias = "in_minutes")]
     in_minutes: Option<i64>,
     codebase: Option<String>,
+    #[serde(alias = "file_pattern")]
     file_pattern: Option<String>,
     topic: Option<String>,
     condition: Option<String>,
@@ -186,6 +188,7 @@ struct SetIntentionArgs {
 #[serde(rename_all = "camelCase")]
 struct ContextSpec {
     #[allow(dead_code)] // Deserialized from JSON but not yet used in context matching
+    #[serde(alias = "current_time")]
     current_time: Option<String>,
     codebase: Option<String>,
     file: Option<String>,
@@ -197,6 +200,7 @@ struct ContextSpec {
 struct CheckIntentionsArgs {
     context: Option<ContextSpec>,
     #[allow(dead_code)] // Deserialized from JSON for future snoozed intentions filter
+    #[serde(alias = "include_snoozed")]
     include_snoozed: Option<bool>,
 }
 
@@ -1046,5 +1050,35 @@ mod tests {
     fn test_check_schema_has_context_field() {
         let schema_value = check_schema();
         assert!(schema_value["properties"]["context"].is_object());
+    }
+
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: TriggerSpec = serde_json::from_value(
+            serde_json::json!({"type": "time", "in_minutes": 30, "file_pattern": "*.rs"}),
+        )
+        .unwrap();
+        let camel: TriggerSpec = serde_json::from_value(
+            serde_json::json!({"type": "time", "inMinutes": 30, "filePattern": "*.rs"}),
+        )
+        .unwrap();
+        assert_eq!(snake.in_minutes, Some(30));
+        assert_eq!(snake.file_pattern.as_deref(), Some("*.rs"));
+        assert_eq!(snake.in_minutes, camel.in_minutes);
+        assert_eq!(snake.file_pattern, camel.file_pattern);
+
+        let ctx_snake: ContextSpec =
+            serde_json::from_value(serde_json::json!({"current_time": "t"})).unwrap();
+        let ctx_camel: ContextSpec =
+            serde_json::from_value(serde_json::json!({"currentTime": "t"})).unwrap();
+        assert_eq!(ctx_snake.current_time.as_deref(), Some("t"));
+        assert_eq!(ctx_snake.current_time, ctx_camel.current_time);
+
+        let chk_snake: CheckIntentionsArgs =
+            serde_json::from_value(serde_json::json!({"include_snoozed": true})).unwrap();
+        let chk_camel: CheckIntentionsArgs =
+            serde_json::from_value(serde_json::json!({"includeSnoozed": true})).unwrap();
+        assert_eq!(chk_snake.include_snoozed, Some(true));
+        assert_eq!(chk_snake.include_snoozed, chk_camel.include_snoozed);
     }
 }

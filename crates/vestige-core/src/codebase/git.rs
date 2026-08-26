@@ -409,11 +409,7 @@ impl GitAnalyzer {
         }
 
         // Sort by strength
-        relationships.sort_by(|a, b| {
-            b.strength
-                .partial_cmp(&a.strength)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        relationships.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(relationships)
     }
@@ -547,12 +543,7 @@ impl GitAnalyzer {
         let symptom = if let Some(colon_byte_pos) = first_line.find(':') {
             // Convert byte position to char position for safe slicing
             let colon_char_pos = first_line[..colon_byte_pos].chars().count();
-            first_line
-                .chars()
-                .skip(colon_char_pos + 1)
-                .collect::<String>()
-                .trim()
-                .to_string()
+            first_line.chars().skip(colon_char_pos + 1).collect::<String>().trim().to_string()
         } else {
             first_line.to_string()
         };
@@ -673,11 +664,11 @@ impl GitAnalyzer {
 
         // Top contributors
         let mut top_contributors: Vec<_> = author_counts.into_iter().collect();
-        top_contributors.sort_by(|a, b| b.1.cmp(&a.1));
+        top_contributors.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         // Hot files (most frequently changed)
         let mut hot_files: Vec<_> = file_counts.into_iter().collect();
-        hot_files.sort_by(|a, b| b.1.cmp(&a.1));
+        hot_files.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         Ok(HistoryAnalysis {
             bug_fixes,
