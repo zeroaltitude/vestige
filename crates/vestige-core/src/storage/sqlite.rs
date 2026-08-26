@@ -2845,14 +2845,34 @@ impl Storage {
     // MEMORY CONNECTIONS PERSISTENCE (Activation Network)
     // ========================================================================
 
-    /// Save a memory connection
+    /// Save a memory connection.
+    ///
+    /// Upserts on the `(source_id, target_id)` primary key. Re-saving an edge that
+    /// already exists must NOT discard what [`Self::strengthen_connection`] accumulated,
+    /// so on conflict:
+    ///
+    /// - `created_at` and `activation_count` are **preserved** — they are the edge's
+    ///   history. Callers construct new records with `created_at = now` and
+    ///   `activation_count = 1` as literals, not as measurements, so writing them
+    ///   through would reset the edge's age and activation history on every re-save.
+    ///   Recording an extra activation is `strengthen_connection`'s job, not this one's.
+    /// - `strength` moves monotonically upward (`MAX` of stored and incoming). A
+    ///   rediscovered edge is fresh evidence for the association and must never
+    ///   *downgrade* a strength that `strengthen_connection` raised; weakening is
+    ///   `apply_connection_decay`'s job.
+    /// - `link_type` and `last_activated` take the incoming value — the newest
+    ///   classification wins, and a re-save is itself an activation event.
     pub fn save_connection(&self, connection: &ConnectionRecord) -> Result<()> {
         let writer = self.writer.lock()
             .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
         writer.execute(
-            "INSERT OR REPLACE INTO memory_connections (
+            "INSERT INTO memory_connections (
                 source_id, target_id, strength, link_type, created_at, last_activated, activation_count
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(source_id, target_id) DO UPDATE SET
+                strength = MAX(excluded.strength, memory_connections.strength),
+                link_type = excluded.link_type,
+                last_activated = excluded.last_activated",
             params![
                 connection.source_id,
                 connection.target_id,
@@ -3732,5 +3752,216 @@ mod tests {
     fn test_get_last_backup_timestamp_no_panic() {
         // Static method should not panic even if no backups exist
         let _ = Storage::get_last_backup_timestamp();
+    }
+
+    // ====================================================================
+    // MEMORY CONNECTIONS (Activation Network)
+    // ====================================================================
+
+    /// Ingest two memories and return their ids — `memory_connections` has
+    /// FOREIGN KEYs into `knowledge_nodes` and `PRAGMA foreign_keys = ON`.
+    fn create_connected_pair(storage: &Storage) -> (String, String) {
+        let input_a = IngestInput {
+            content: "Connection endpoint A".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+        let input_b = IngestInput {
+            content: "Connection endpoint B".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+        let a = storage.ingest(input_a).unwrap();
+        let b = storage.ingest(input_b).unwrap();
+        (a.id, b.id)
+    }
+
+    fn get_connection(storage: &Storage, source: &str, target: &str) -> ConnectionRecord {
+        let all = storage.get_connections_for_memory(source).unwrap();
+        all.into_iter()
+            .find(|c| c.source_id == source && c.target_id == target)
+            .expect("connection should exist")
+    }
+
+    #[test]
+    fn test_save_connection_inserts_new_edge_verbatim() {
+        let storage = create_test_storage();
+        let (a, b) = create_connected_pair(&storage);
+        let created = Utc::now() - Duration::days(3);
+
+        let record = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.42,
+            link_type: "semantic".to_string(),
+            created_at: created,
+            last_activated: created,
+            activation_count: 1,
+        };
+        storage.save_connection(&record).unwrap();
+
+        let stored = get_connection(&storage, &a, &b);
+        assert!((stored.strength - 0.42).abs() < 1e-9);
+        assert_eq!(stored.link_type, "semantic");
+        assert_eq!(stored.activation_count, 1);
+        assert!((stored.created_at - created).num_seconds().abs() <= 1);
+    }
+
+    /// Regression for openclaw-vestige-qsy: `INSERT OR REPLACE` reset
+    /// `activation_count` to the incoming literal and overwrote `created_at`,
+    /// so every nightly dream flattened the history of each edge it rediscovered.
+    #[test]
+    fn test_save_connection_preserves_activation_count_and_created_at() {
+        let storage = create_test_storage();
+        let (a, b) = create_connected_pair(&storage);
+        let original_created = Utc::now() - Duration::days(30);
+
+        let original = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.5,
+            link_type: "semantic".to_string(),
+            created_at: original_created,
+            last_activated: original_created,
+            activation_count: 7,
+        };
+        storage.save_connection(&original).unwrap();
+
+        // Re-save the same edge the way a dream does: created_at = now,
+        // activation_count = 1, strength = this run's raw similarity.
+        let now = Utc::now();
+        let rediscovered = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.31,
+            link_type: "shared_concepts".to_string(),
+            created_at: now,
+            last_activated: now,
+            activation_count: 1,
+        };
+        storage.save_connection(&rediscovered).unwrap();
+
+        let stored = get_connection(&storage, &a, &b);
+        assert_eq!(
+            stored.activation_count, 7,
+            "activation history was discarded"
+        );
+        assert!(
+            (stored.created_at - original_created).num_seconds().abs() <= 1,
+            "created_at was overwritten: {} != {}",
+            stored.created_at,
+            original_created
+        );
+        // Strength moves monotonically upward — a rediscovery must not downgrade it.
+        assert!(
+            (stored.strength - 0.5).abs() < 1e-9,
+            "strength was downgraded to {}",
+            stored.strength
+        );
+        // Fields that legitimately move on re-save.
+        assert_eq!(stored.link_type, "shared_concepts");
+        assert!((stored.last_activated - now).num_seconds().abs() <= 1);
+
+        // And the upsert must not have duplicated the row.
+        assert_eq!(storage.get_all_connections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_save_connection_raises_strength_when_incoming_is_higher() {
+        let storage = create_test_storage();
+        let (a, b) = create_connected_pair(&storage);
+        let now = Utc::now();
+
+        for strength in [0.2, 0.8] {
+            let record = ConnectionRecord {
+                source_id: a.clone(),
+                target_id: b.clone(),
+                strength,
+                link_type: "semantic".to_string(),
+                created_at: now,
+                last_activated: now,
+                activation_count: 1,
+            };
+            storage.save_connection(&record).unwrap();
+        }
+
+        let stored = get_connection(&storage, &a, &b);
+        assert!(
+            (stored.strength - 0.8).abs() < 1e-9,
+            "strength did not rise: {}",
+            stored.strength
+        );
+    }
+
+    /// The end-to-end shape of the bug: strengthen, then re-save, and confirm
+    /// nothing `strengthen_connection` accumulated is lost.
+    #[test]
+    fn test_strengthen_then_save_connection_keeps_accumulation() {
+        let storage = create_test_storage();
+        let (a, b) = create_connected_pair(&storage);
+        let created = Utc::now() - Duration::days(10);
+
+        let record = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.3,
+            link_type: "semantic".to_string(),
+            created_at: created,
+            last_activated: created,
+            activation_count: 1,
+        };
+        storage.save_connection(&record).unwrap();
+
+        for _ in 0..4 {
+            assert!(storage.strengthen_connection(&a, &b, 0.1).unwrap());
+        }
+
+        let strengthened = get_connection(&storage, &a, &b);
+        assert_eq!(strengthened.activation_count, 5);
+        assert!(
+            (strengthened.strength - 0.7).abs() < 1e-9,
+            "setup: {}",
+            strengthened.strength
+        );
+
+        // A later dream rediscovers the pair with a weaker raw similarity.
+        let now = Utc::now();
+        let rediscovered = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.35,
+            link_type: "semantic".to_string(),
+            created_at: now,
+            last_activated: now,
+            activation_count: 1,
+        };
+        storage.save_connection(&rediscovered).unwrap();
+
+        let after = get_connection(&storage, &a, &b);
+        assert_eq!(
+            after.activation_count, 5,
+            "strengthen_connection history lost"
+        );
+        assert!(
+            (after.strength - 0.7).abs() < 1e-9,
+            "strength regressed to {}",
+            after.strength
+        );
+        assert!((after.created_at - created).num_seconds().abs() <= 1);
+
+        // Strengthening still works after the re-save.
+        assert!(storage.strengthen_connection(&a, &b, 0.1).unwrap());
+        let final_state = get_connection(&storage, &a, &b);
+        assert_eq!(final_state.activation_count, 6);
+        assert!((final_state.strength - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_strengthen_connection_returns_false_for_unknown_edge() {
+        let storage = create_test_storage();
+        let strengthened = storage
+            .strengthen_connection("missing-a", "missing-b", 0.1)
+            .unwrap();
+        assert!(!strengthened);
     }
 }
