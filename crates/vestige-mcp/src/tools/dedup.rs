@@ -45,6 +45,7 @@ pub fn schema() -> Value {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DedupArgs {
+    #[serde(alias = "similarity_threshold")]
     similarity_threshold: Option<f64>,
     limit: Option<usize>,
     tags: Option<Vec<String>>,
@@ -283,6 +284,19 @@ mod tests {
         let schema = schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["similarity_threshold"].is_object());
+    }
+
+    /// schema() advertises `similarity_threshold`; DedupArgs is camelCase.
+    /// Both spellings must reach the same field.
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: DedupArgs =
+            serde_json::from_value(serde_json::json!({"similarity_threshold": 0.85})).unwrap();
+        let camel: DedupArgs =
+            serde_json::from_value(serde_json::json!({"similarityThreshold": 0.85})).unwrap();
+
+        assert_eq!(snake.similarity_threshold, Some(0.85));
+        assert_eq!(snake.similarity_threshold, camel.similarity_threshold);
     }
 
     #[test]

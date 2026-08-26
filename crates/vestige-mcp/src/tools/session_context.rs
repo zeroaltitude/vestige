@@ -453,8 +453,13 @@ struct TriggerData {
     #[serde(rename = "type")]
     trigger_type: Option<String>,
     at: Option<String>,
+    // `intention` persists trigger data two ways: explicit triggers are serialized from
+    // `TriggerSpec` (camelCase), while the NLP path writes `{"type":"time","in_minutes":N}`
+    // by hand. Accept both spellings so neither form is silently dropped on read-back.
+    #[serde(alias = "in_minutes")]
     in_minutes: Option<i64>,
     codebase: Option<String>,
+    #[serde(alias = "file_pattern")]
     file_pattern: Option<String>,
     topic: Option<String>,
 }
@@ -498,6 +503,30 @@ mod tests {
     // ========================================================================
     // SCHEMA TESTS
     // ========================================================================
+
+    /// TriggerData reads persisted `intention.trigger_data`, which exists in two
+    /// spellings: camelCase (serialized from `intention`'s TriggerSpec) and
+    /// snake_case (written by hand on the NLP path). Both must read back.
+    #[test]
+    fn test_trigger_data_accepts_both_spellings() {
+        let snake: TriggerData = serde_json::from_value(serde_json::json!({
+            "type": "time",
+            "in_minutes": 15,
+            "file_pattern": "*.md",
+        }))
+        .unwrap();
+        let camel: TriggerData = serde_json::from_value(serde_json::json!({
+            "type": "time",
+            "inMinutes": 15,
+            "filePattern": "*.md",
+        }))
+        .unwrap();
+
+        assert_eq!(snake.in_minutes, Some(15));
+        assert_eq!(snake.file_pattern.as_deref(), Some("*.md"));
+        assert_eq!(snake.in_minutes, camel.in_minutes);
+        assert_eq!(snake.file_pattern, camel.file_pattern);
+    }
 
     #[test]
     fn test_schema_has_properties() {
