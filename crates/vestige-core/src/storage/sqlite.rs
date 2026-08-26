@@ -2054,6 +2054,18 @@ impl Storage {
         }
 
         // 15. Connection Graph Maintenance (decay + prune weak connections)
+        //
+        // Decay must run before the prune so an edge that has stopped being
+        // reactivated can actually reach the floor and be removed. Without it
+        // (openclaw-vestige-eh4) persisted strength had no downward path at
+        // all: `save_connection` only moves strength upward (`MAX`) and
+        // `strengthen_connection` only adds, while this step — the only place
+        // that could weaken an edge — called neither. This mirrors
+        // `MemoryDreamer::stage4_prune`, which applies the same factor to the
+        // in-memory `ConnectionGraph`.
+        let _connections_decayed = self
+            .apply_connection_decay(crate::advanced::dreams::CONNECTION_DECAY_FACTOR)
+            .unwrap_or(0) as i64;
         let _connections_pruned = self.prune_weak_connections(0.05).unwrap_or(0) as i64;
 
         // 16. FTS5 index optimization — merge segments for faster keyword search
@@ -4002,5 +4014,65 @@ mod tests {
             .strengthen_connection("missing-a", "missing-b", 0.1)
             .unwrap();
         assert!(!strengthened);
+    }
+
+    /// Regression for openclaw-vestige-eh4: step 15 of the consolidation cycle
+    /// is labelled "decay + prune" but only pruned, and
+    /// `Storage::apply_connection_decay` had zero callers in the whole tree.
+    /// With `save_connection` moving strength only upward (`MAX`) and
+    /// `strengthen_connection` only adding, a persisted edge's strength had no
+    /// downward path at all.
+    ///
+    /// The endpoints are deliberately *dissimilar*: step 4 of the cycle is
+    /// auto-dedup at a 0.85 cosine threshold, and `create_connected_pair`'s
+    /// near-identical "endpoint A"/"endpoint B" pair merges under it — which
+    /// deletes one node and cascades the edge away before step 15 runs.
+    #[test]
+    fn test_consolidation_decays_persisted_connection_strength() {
+        let storage = create_test_storage();
+        let input_a = IngestInput {
+            content: "Postgres uses MVCC so readers never block writers".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+        let input_b = IngestInput {
+            content: "Sourdough starter doubles in about four hours at 24C".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+        let a = storage.ingest(input_a).unwrap().id;
+        let b = storage.ingest(input_b).unwrap().id;
+        let now = Utc::now();
+
+        let record = ConnectionRecord {
+            source_id: a.clone(),
+            target_id: b.clone(),
+            strength: 0.8,
+            link_type: "semantic".to_string(),
+            created_at: now,
+            last_activated: now,
+            activation_count: 1,
+        };
+        storage.save_connection(&record).unwrap();
+
+        storage.run_consolidation().unwrap();
+
+        let stored = get_connection(&storage, &a, &b);
+        assert!(
+            stored.strength < 0.8,
+            "connection strength did not fall: still {}",
+            stored.strength
+        );
+        let expected = 0.8 * crate::advanced::dreams::CONNECTION_DECAY_FACTOR;
+        assert!(
+            (stored.strength - expected).abs() < 1e-9,
+            "expected exactly one decay factor applied ({}), got {}",
+            expected,
+            stored.strength
+        );
+
+        // Decay weakens an edge; it must not delete it or reset its history.
+        assert_eq!(stored.activation_count, 1);
+        assert_eq!(storage.get_all_connections().unwrap().len(), 1);
     }
 }

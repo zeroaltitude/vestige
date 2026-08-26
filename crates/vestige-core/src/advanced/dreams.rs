@@ -87,8 +87,13 @@ const MIN_IDLE_TIME_FOR_CONSOLIDATION_MINS: i64 = 30;
 /// Minimum brief idle time for force/mini consolidation triggers (5 minutes)
 const MIN_BRIEF_IDLE_MINS: i64 = 5;
 
-/// Connection strength decay factor
-const CONNECTION_DECAY_FACTOR: f64 = 0.95;
+/// Connection strength decay factor, applied once per consolidation cycle.
+///
+/// Used by both halves of the connection graph so they cannot drift apart:
+/// [`ConnectionGraph::apply_decay`] for the in-memory graph (see
+/// `stage4_prune`), and `Storage::apply_connection_decay` for the persisted
+/// `memory_connections` table (step 15 of `Storage::run_consolidation`).
+pub(crate) const CONNECTION_DECAY_FACTOR: f64 = 0.95;
 
 /// Minimum connection strength to keep
 const MIN_CONNECTION_STRENGTH: f64 = 0.1;
