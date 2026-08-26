@@ -789,21 +789,47 @@ async fn test_consolidation_connection_strengthening() {
     // Second consolidation - should strengthen existing connections
     let second_report = scheduler.run_consolidation_cycle(&memories).await;
 
-    // Strengthening should occur in stage 3 - verify accessible
-    let strengthened_count = first_report.stage3_strengthened;
-    let _ = strengthened_count; // Stage 3 completed
-
-    // Connection stats should be available
-    let stats = scheduler.get_connection_stats();
-    if let Some(conn_stats) = stats {
-        // Verify stats are accessible (usize values are always >= 0)
-        let _ = conn_stats.total_memories;
+    // Both cycles should complete successfully. `duration_ms` is not a usable
+    // signal here: three tiny in-memory fixtures consolidate in well under a
+    // millisecond, so it legitimately rounds to 0. What a completed cycle does
+    // guarantee is a stage-1 replay of everything it was handed plus a dream
+    // result, so assert that for both cycles.
+    for (label, report) in [("first", &first_report), ("second", &second_report)] {
+        let replay = report
+            .stage1_replay
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} cycle should record a stage-1 replay"));
+        assert_eq!(
+            replay.sequence.len(),
+            memories.len(),
+            "{label} cycle should replay every memory it was given"
+        );
+        assert!(
+            report.dream_result.is_some(),
+            "{label} cycle should record a dream result"
+        );
     }
 
-    // Both cycles should complete successfully - verify duration is tracked
+    // Ordering: the second cycle ran after the first.
     assert!(
-        first_report.duration_ms > 0 || second_report.duration_ms > 0 || true,
-        "Both consolidation cycles should complete"
+        second_report.completed_at >= first_report.completed_at,
+        "second cycle should complete no earlier than the first ({:?} vs {:?})",
+        second_report.completed_at,
+        first_report.completed_at
+    );
+
+    // The connection graph is queryable once a cycle has run.
+    //
+    // NOTE: this test cannot currently assert that stage 3 strengthened
+    // anything. Stage 3 only strengthens edges that stage 2 created, and stage 2
+    // requires similarity >= MIN_SIMILARITY_FOR_CONNECTION (0.5). The three
+    // fixtures above score ~0.25-0.30 under the tag/content fallback metric, so
+    // no edges are ever created and `stage3_strengthened` is 0 for both cycles.
+    // Fixing that fixture is tracked separately (openclaw-vestige-wjl); it is not
+    // in scope for the vacuous-assertion cleanup.
+    assert!(
+        scheduler.get_connection_stats().is_some(),
+        "connection stats should be available after a consolidation cycle"
     );
 }
 
