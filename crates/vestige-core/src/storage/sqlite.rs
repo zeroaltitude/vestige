@@ -22,7 +22,9 @@ use crate::memory::{
 use crate::search::sanitize_fts5_query;
 
 #[cfg(feature = "embeddings")]
-use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
+use crate::embeddings::{
+    matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL_NAME,
+};
 
 #[cfg(feature = "vector-search")]
 use crate::search::{linear_combination, VectorIndex};
@@ -609,14 +611,14 @@ impl Storage {
                     node_id,
                     embedding.to_bytes(),
                     EMBEDDING_DIMENSIONS as i32,
-                    "all-MiniLM-L6-v2",
+                    EMBEDDING_MODEL_NAME,
                     now.to_rfc3339(),
                 ],
             )?;
 
             writer.execute(
-                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = 'all-MiniLM-L6-v2' WHERE id = ?1",
-                params![node_id],
+                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = ?2 WHERE id = ?1",
+                params![node_id, EMBEDDING_MODEL_NAME],
             )?;
         }
 
@@ -1149,11 +1151,23 @@ impl Storage {
             |row| row.get(0),
         )?;
 
-        let embedding_model: Option<String> = if nodes_with_embeddings > 0 {
-            Some("all-MiniLM-L6-v2".to_string())
-        } else {
-            None
-        };
+        // Report the model the stored vectors were actually produced by, read back
+        // from their provenance column, rather than asserting whatever this build
+        // happens to embed with. A database can outlive a model change, and it can
+        // hold rows from more than one model — in that case name the dominant one.
+        // (This path is compiled without the `embeddings` feature too, so it cannot
+        // reference EMBEDDING_MODEL_NAME.)
+        let embedding_model: Option<String> = reader
+            .query_row(
+                "SELECT embedding_model FROM knowledge_nodes
+                 WHERE has_embedding = 1 AND embedding_model IS NOT NULL
+                 GROUP BY embedding_model
+                 ORDER BY COUNT(*) DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         Ok(MemoryStats {
             total_nodes: total,

@@ -49,6 +49,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "v2.0.0 Cognitive Leap: emotional memory, flashbulb encoding, temporal hierarchy",
         up: MIGRATION_V9_UP,
     },
+    Migration {
+        version: 10,
+        description: "Correct embedding provenance mislabelled as all-MiniLM-L6-v2",
+        up: MIGRATION_V10_UP,
+    },
 ];
 
 /// A database migration
@@ -605,6 +610,51 @@ ALTER TABLE dream_history ADD COLUMN creative_connections_found INTEGER DEFAULT 
 UPDATE schema_version SET version = 9, applied_at = datetime('now');
 "#;
 
+/// V10: Correct embedding provenance that was written with a hardcoded, wrong model name
+///
+/// Until this release the writer stamped the literal `all-MiniLM-L6-v2` into
+/// `node_embeddings.model` and `knowledge_nodes.embedding_model` regardless of the model
+/// actually used, which has been nomic-embed-text-v1.5 throughout. Those rows are rewritten
+/// here so the provenance columns can answer "which vectors predate a model change".
+///
+/// **Only 256-dimensional rows are touched.** Vestige genuinely shipped MiniLM once (see the
+/// V4 comment: "Version 1 = all-MiniLM-L6-v2 (384d, pre-2026)"), so a sufficiently old
+/// database can hold real MiniLM vectors, and a BGE-era database can hold 768d ones. Both
+/// were also stamped `all-MiniLM-L6-v2`, and rewriting them would replace one false label
+/// with another — worse, it would make truly stale vectors look current. Native
+/// dimensionality separates the three cleanly: MiniLM is 384, BGE is 768, and only the
+/// current nomic path Matryoshka-truncates to `EMBEDDING_DIMENSIONS` = 256. Rows we cannot
+/// prove the origin of are deliberately left alone.
+///
+/// The model name below is intentionally a literal rather than
+/// [`crate::DEFAULT_EMBEDDING_MODEL`]. A migration records a historical fact — *these
+/// specific rows were produced by nomic-embed-text-v1.5* — and must keep saying that even
+/// after the constant moves on to a different model. Do not "deduplicate" it.
+///
+/// Idempotent: after it runs, no row matches the `all-MiniLM-L6-v2` predicate, so a second
+/// application is a no-op.
+const MIGRATION_V10_UP: &str = r#"
+-- ============================================================================
+-- EMBEDDING PROVENANCE CORRECTION
+-- ============================================================================
+
+-- knowledge_nodes is updated first: it selects on node_embeddings.model, which the
+-- following statement rewrites. Reversing the order would match nothing.
+UPDATE knowledge_nodes
+SET embedding_model = 'nomic-ai/nomic-embed-text-v1.5'
+WHERE embedding_model = 'all-MiniLM-L6-v2'
+  AND id IN (
+    SELECT node_id FROM node_embeddings
+    WHERE model = 'all-MiniLM-L6-v2' AND dimensions = 256
+  );
+
+UPDATE node_embeddings
+SET model = 'nomic-ai/nomic-embed-text-v1.5'
+WHERE model = 'all-MiniLM-L6-v2' AND dimensions = 256;
+
+UPDATE schema_version SET version = 10, applied_at = datetime('now');
+"#;
+
 /// Get current schema version from database
 pub fn get_current_version(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
     conn.query_row(
@@ -644,4 +694,128 @@ pub fn apply_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<u32> {
     }
 
     Ok(applied)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOMIC: &str = "nomic-ai/nomic-embed-text-v1.5";
+    const MINILM: &str = "all-MiniLM-L6-v2";
+
+    /// Insert a node plus its embedding row, both stamped with `model`.
+    fn seed(conn: &rusqlite::Connection, id: &str, dimensions: i32, model: &str) {
+        conn.execute(
+            "INSERT INTO knowledge_nodes
+             (id, content, node_type, created_at, updated_at, last_accessed,
+              has_embedding, embedding_model)
+             VALUES (?1, 'content', 'fact', '2026-01-01', '2026-01-01', '2026-01-01', 1, ?2)",
+            rusqlite::params![id, model],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO node_embeddings (node_id, embedding, dimensions, model, created_at)
+             VALUES (?1, X'00', ?2, ?3, '2026-01-01')",
+            rusqlite::params![id, dimensions, model],
+        )
+        .unwrap();
+    }
+
+    fn model_of(conn: &rusqlite::Connection, id: &str) -> (String, String) {
+        let embeddings_model: String = conn
+            .query_row(
+                "SELECT model FROM node_embeddings WHERE node_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let nodes_model: String = conn
+            .query_row(
+                "SELECT embedding_model FROM knowledge_nodes WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (embeddings_model, nodes_model)
+    }
+
+    /// V10 must relabel only the rows it can prove came from the current model.
+    ///
+    /// 256d is uniquely produced by the Matryoshka-truncated nomic path, so those rows
+    /// were mislabelled by the hardcoded writer. 384d (real MiniLM) and 768d (BGE era)
+    /// carry the same wrong label but a different, unprovable origin, and must survive
+    /// untouched — relabelling them would make genuinely stale vectors look current.
+    #[test]
+    fn v10_relabels_only_256d_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply_migrations(&conn).unwrap();
+
+        seed(&conn, "mislabelled", 256, MINILM);
+        seed(&conn, "real-minilm", 384, MINILM);
+        seed(&conn, "bge-era", 768, MINILM);
+        seed(&conn, "already-correct", 256, NOMIC);
+
+        conn.execute_batch(MIGRATION_V10_UP).unwrap();
+
+        assert_eq!(
+            model_of(&conn, "mislabelled"),
+            (NOMIC.to_string(), NOMIC.to_string()),
+            "256d rows were written by the nomic path and must be corrected in both tables"
+        );
+        assert_eq!(
+            model_of(&conn, "real-minilm"),
+            (MINILM.to_string(), MINILM.to_string()),
+            "384d rows may be genuine MiniLM vectors and must not be relabelled"
+        );
+        assert_eq!(
+            model_of(&conn, "bge-era"),
+            (MINILM.to_string(), MINILM.to_string()),
+            "768d rows predate the nomic path and must not be relabelled"
+        );
+        assert_eq!(
+            model_of(&conn, "already-correct"),
+            (NOMIC.to_string(), NOMIC.to_string()),
+            "correctly labelled rows are unaffected"
+        );
+    }
+
+    /// Migrations can be replayed (e.g. a partially-applied upgrade); V10 must be a no-op
+    /// the second time rather than corrupting anything.
+    #[test]
+    fn v10_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply_migrations(&conn).unwrap();
+
+        seed(&conn, "mislabelled", 256, MINILM);
+        seed(&conn, "real-minilm", 384, MINILM);
+
+        conn.execute_batch(MIGRATION_V10_UP).unwrap();
+        let after_first = (
+            model_of(&conn, "mislabelled"),
+            model_of(&conn, "real-minilm"),
+        );
+
+        conn.execute_batch(MIGRATION_V10_UP).unwrap();
+        let after_second = (
+            model_of(&conn, "mislabelled"),
+            model_of(&conn, "real-minilm"),
+        );
+
+        assert_eq!(after_first, after_second, "V10 must be safe to run twice");
+    }
+
+    /// The schema version the migration list claims must match what V10 writes.
+    #[test]
+    fn v10_is_the_latest_migration() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply_migrations(&conn).unwrap();
+
+        let latest = MIGRATIONS.last().unwrap().version;
+        assert_eq!(latest, 10);
+        assert_eq!(get_current_version(&conn).unwrap(), latest);
+    }
 }

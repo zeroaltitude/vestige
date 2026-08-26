@@ -385,7 +385,7 @@ pub use neuroscience::{
 #[cfg(feature = "embeddings")]
 pub use embeddings::{
     cosine_similarity, euclidean_distance, Embedding, EmbeddingError, EmbeddingService,
-    EMBEDDING_DIMENSIONS,
+    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL_NAME,
 };
 
 // Search (when feature enabled)
@@ -419,9 +419,29 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// FSRS algorithm version (6 = 21 parameters)
 pub const FSRS_VERSION: u8 = 6;
 
-/// Default embedding model (2026 GOD TIER: nomic-embed-text-v1.5)
-/// 8192 token context, Matryoshka support, fully open source
+/// Identity of the embedding model this build produces vectors with.
+///
+/// This is the **single source of truth** for the model name: it is what
+/// [`EmbeddingService::model_name`] reports and what gets written verbatim into
+/// the `node_embeddings.model` and `knowledge_nodes.embedding_model` provenance
+/// columns. Changing the model means changing this constant, so stored rows
+/// describe their true origin by construction rather than by remembering to
+/// update a second copy next to the writer.
+///
+/// It lives here, rather than inside the `embeddings` module, because that module
+/// is behind the `embeddings` feature; defining it at the crate root keeps one
+/// definition reachable in every feature combination. `embeddings` re-exports it
+/// as `EMBEDDING_MODEL_NAME` for callers that work in embedding terms.
+///
+/// nomic-embed-text-v1.5: 8192 token context, Matryoshka support, fully open source.
+#[cfg(not(feature = "nomic-v2"))]
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5";
+
+/// Identity of the embedding model this build produces vectors with.
+///
+/// See the `nomic-v2`-disabled variant of this constant for the full contract.
+#[cfg(feature = "nomic-v2")]
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v2-moe";
 
 // ============================================================================
 // PRELUDE

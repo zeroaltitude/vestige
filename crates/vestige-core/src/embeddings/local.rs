@@ -20,6 +20,14 @@ use std::sync::{Mutex, OnceLock};
 /// (Matryoshka Representation Learning — the first N dims ARE the N-dim representation)
 pub const EMBEDDING_DIMENSIONS: usize = 256;
 
+/// Name of the model these embeddings are produced by.
+///
+/// Re-exported from [`crate::DEFAULT_EMBEDDING_MODEL`] so the embedding layer and
+/// the storage layer cannot disagree: whatever `get_model()` initializes is what
+/// gets recorded in the `model` provenance column. Pair it with
+/// [`EMBEDDING_DIMENSIONS`] whenever a stored vector is described.
+pub const EMBEDDING_MODEL_NAME: &str = crate::DEFAULT_EMBEDDING_MODEL;
+
 /// Maximum text length for embedding (truncated if longer)
 pub const MAX_TEXT_LENGTH: usize = 8192;
 
@@ -239,10 +247,7 @@ impl EmbeddingService {
 
     /// Get the model name
     pub fn model_name(&self) -> &'static str {
-        #[cfg(feature = "nomic-v2")]
-        { "nomic-ai/nomic-embed-text-v2-moe" }
-        #[cfg(not(feature = "nomic-v2"))]
-        { "nomic-ai/nomic-embed-text-v1.5" }
+        EMBEDDING_MODEL_NAME
     }
 
     /// Get the embedding dimensions
