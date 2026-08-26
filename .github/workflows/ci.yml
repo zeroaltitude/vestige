@@ -63,7 +63,8 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: apps/dashboard/pnpm-lock.yaml
+          # The dashboard has no lockfile of its own; pnpm resolves to the workspace root.
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

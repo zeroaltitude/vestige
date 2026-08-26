@@ -6,8 +6,51 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 
+/**
+ * True when this script is running inside the vestige source monorepo rather than as an
+ * installed dependency. In-tree the binaries come from `cargo build --release -p vestige-mcp`,
+ * so fetching a prebuilt release archive is pointless — and failing here breaks every
+ * workspace `pnpm install`, including `apps/dashboard`, whose only runtime dependency is
+ * `three` and which never touches the MCP server.
+ *
+ * Deliberately not a bare `process.env.CI` check: that would also silently skip the download
+ * for real consumers who install the published package on their own CI, swapping a clear
+ * install-time error for a confusing "binary not found" at first run.
+ */
+function isSourceMonorepo() {
+  // scripts/ -> vestige-mcp-npm/ -> packages/ -> repo root
+  const repoRoot = path.join(__dirname, '..', '..', '..');
+  try {
+    const rootManifest = path.join(repoRoot, 'package.json');
+    if (!fs.existsSync(rootManifest)) return false;
+    if (JSON.parse(fs.readFileSync(rootManifest, 'utf8')).name !== 'vestige') return false;
+    return fs.existsSync(path.join(repoRoot, 'crates', 'vestige-mcp', 'Cargo.toml'));
+  } catch {
+    return false;
+  }
+}
+
+if (process.env.VESTIGE_SKIP_BINARY_DOWNLOAD === '1') {
+  console.log('VESTIGE_SKIP_BINARY_DOWNLOAD=1 — skipping prebuilt binary download.');
+  process.exit(0);
+}
+
+if (isSourceMonorepo()) {
+  console.log('Detected the vestige source monorepo — skipping prebuilt binary download.');
+  console.log('Build the binaries from source instead: cargo build --release -p vestige-mcp');
+  process.exit(0);
+}
+
 const VERSION = require('../package.json').version;
-const BINARY_VERSION = '1.1.3'; // GitHub release version for binaries
+
+// GitHub release tag hosting the prebuilt binaries.
+//
+// INVARIANT: this tag must publish an archive for *every* target `target` below can name.
+// Do not derive it from VERSION — the npm package version and the binary release tag are not
+// kept in lockstep upstream, and v2.0.0 (the current VERSION) published only the Windows zip.
+// Do not bump it to a release that ships a subset of targets either; check first with
+// `gh release view v<tag> --repo samvallad33/vestige --json assets -q '.assets[].name'`.
+const BINARY_VERSION = process.env.VESTIGE_BINARY_VERSION || '2.3.0';
 const PLATFORM = os.platform();
 const ARCH = os.arch();
 
@@ -48,6 +91,21 @@ if (!fs.existsSync(targetDir)) {
 }
 
 /**
+ * Remove the file we opened for a download that never produced bytes.
+ *
+ * Synchronous on purpose: main() calls process.exit(1) from its catch handler, so a
+ * callback-based fs.unlink is never given a chance to run and the empty archive survives.
+ */
+function discardPartialFile(file, dest) {
+  file.destroy();
+  try {
+    fs.unlinkSync(dest);
+  } catch {
+    // Already gone, or never created — nothing to clean up.
+  }
+}
+
+/**
  * Download a file following redirects (GitHub releases use redirects)
  */
 function download(url, dest) {
@@ -68,6 +126,7 @@ function download(url, dest) {
         }
 
         if (response.statusCode !== 200) {
+          discardPartialFile(file, dest);
           reject(new Error(`Download failed: HTTP ${response.statusCode}`));
           return;
         }
@@ -78,7 +137,7 @@ function download(url, dest) {
           resolve();
         });
       }).on('error', (err) => {
-        fs.unlink(dest, () => {}); // Delete partial file
+        discardPartialFile(file, dest); // Delete partial file
         reject(err);
       });
     };
