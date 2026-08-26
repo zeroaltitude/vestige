@@ -20,7 +20,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib
+      # `--bins` is load-bearing: vestige-mcp's lib.rs only exposes `cognitive`
+      # and `dashboard`, while the entire tools/ tree hangs off main.rs (the bin
+      # target). `--lib` alone selects an almost-empty target for that crate and
+      # reports "0 passed" as success, hiding ~379 tests. Integration tests are
+      # deliberately excluded here — they have their own jobs below.
+      - run: cargo test --workspace --lib --bins
 
   mcp-tests:
     name: MCP E2E Tests

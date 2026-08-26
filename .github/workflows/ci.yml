@@ -41,11 +41,17 @@ jobs:
       - name: Check
         run: cargo check --workspace
 
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
+      # Test runs BEFORE Clippy on purpose. These steps are independent, but a
+      # failing `-D warnings` gate ahead of Test silently skips it — which is how
+      # the full-workspace suite sat un-run for months while the job merely looked
+      # red for lint reasons. The toolchain is pinned to @stable, so new clippy
+      # lints arrive on their own schedule and would re-arm that trap. Clippy still
+      # gates the job; it just no longer decides whether the tests get to report.
       - name: Test
         run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
 
   dashboard:
     name: Dashboard Build
