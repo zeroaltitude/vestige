@@ -620,14 +620,19 @@ impl Storage {
                     node_id,
                     embedding.to_bytes(),
                     EMBEDDING_DIMENSIONS as i32,
-                    "all-MiniLM-L6-v2",
+                    // Provenance comes from the service, not DEFAULT_EMBEDDING_MODEL:
+                    // that constant is cfg-gated and reports v2-moe under `nomic-v2`,
+                    // while get_model() loads v1.5 in every configuration. Writing the
+                    // constant here would stamp a false model onto real v1.5 vectors —
+                    // the defect openclaw-vestige-c7u fixed in model_name().
+                    self.embedding_service.model_name(),
                     now.to_rfc3339(),
                 ],
             )?;
 
             writer.execute(
-                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = 'all-MiniLM-L6-v2' WHERE id = ?1",
-                params![node_id],
+                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = ?2 WHERE id = ?1",
+                params![node_id, self.embedding_service.model_name()],
             )?;
         }
 
@@ -1160,11 +1165,23 @@ impl Storage {
             |row| row.get(0),
         )?;
 
-        let embedding_model: Option<String> = if nodes_with_embeddings > 0 {
-            Some("all-MiniLM-L6-v2".to_string())
-        } else {
-            None
-        };
+        // Report the model the stored vectors were actually produced by, read back
+        // from their provenance column, rather than asserting whatever this build
+        // happens to embed with. A database can outlive a model change, and it can
+        // hold rows from more than one model — in that case name the dominant one.
+        // (This path is compiled without the `embeddings` feature too, so it cannot
+        // reference EMBEDDING_MODEL_NAME.)
+        let embedding_model: Option<String> = reader
+            .query_row(
+                "SELECT embedding_model FROM knowledge_nodes
+                 WHERE has_embedding = 1 AND embedding_model IS NOT NULL
+                 GROUP BY embedding_model
+                 ORDER BY COUNT(*) DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         Ok(MemoryStats {
             total_nodes: total,

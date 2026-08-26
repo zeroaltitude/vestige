@@ -15,7 +15,8 @@ mod local;
 
 pub use local::{
     cosine_similarity, dot_product, euclidean_distance, matryoshka_truncate, Embedding,
-    EmbeddingError, EmbeddingService, BATCH_SIZE, EMBEDDING_DIMENSIONS, MAX_TEXT_LENGTH,
+    EmbeddingError, EmbeddingService, BATCH_SIZE, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL_NAME,
+    MAX_TEXT_LENGTH,
 };
 
 pub use code::CodeEmbedding;

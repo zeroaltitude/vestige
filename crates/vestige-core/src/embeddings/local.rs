@@ -22,6 +22,18 @@ use std::sync::{Mutex, OnceLock};
 /// (Matryoshka Representation Learning — the first N dims ARE the N-dim representation)
 pub const EMBEDDING_DIMENSIONS: usize = 256;
 
+/// Identity of the embedding model this build is *configured* for.
+///
+/// Re-exported from [`crate::DEFAULT_EMBEDDING_MODEL`], which is cfg-gated and
+/// reports `nomic-embed-text-v2-moe` under the `nomic-v2` feature.
+///
+/// **Do not write this into a provenance column.** `get_model()` loads v1.5 in
+/// every feature combination — the `nomic-v2` backend is not implemented — so
+/// under that feature this constant names a model that produced none of the
+/// stored vectors. Use [`EmbeddingService::model_name`] for anything that
+/// records what a vector was actually embedded with (openclaw-vestige-c7u).
+pub const EMBEDDING_MODEL_NAME: &str = crate::DEFAULT_EMBEDDING_MODEL;
+
 /// Maximum text length for embedding (truncated if longer)
 pub const MAX_TEXT_LENGTH: usize = 8192;
 
