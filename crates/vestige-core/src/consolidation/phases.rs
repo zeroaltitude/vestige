@@ -333,10 +333,10 @@ impl DreamEngine {
         emotion: &EmotionCategory,
     ) -> TriageCategory {
         // High emotional content
-        if matches!(emotion, EmotionCategory::Frustration | EmotionCategory::Urgency | EmotionCategory::Joy | EmotionCategory::Surprise) {
-            if node.sentiment_magnitude > 0.4 {
-                return TriageCategory::Emotional;
-            }
+        if matches!(emotion, EmotionCategory::Frustration | EmotionCategory::Urgency | EmotionCategory::Joy | EmotionCategory::Surprise)
+            && node.sentiment_magnitude > 0.4
+        {
+            return TriageCategory::Emotional;
         }
 
         // Future-relevant (intentions, TODOs)
@@ -386,7 +386,7 @@ impl DreamEngine {
             .collect();
 
         // Process replay queue in oscillation waves
-        let wave_count = (replay_queue.len() + self.wave_batch_size - 1) / self.wave_batch_size;
+        let wave_count = replay_queue.len().div_ceil(self.wave_batch_size);
 
         for wave_idx in 0..wave_count {
             let wave_start = wave_idx * self.wave_batch_size;

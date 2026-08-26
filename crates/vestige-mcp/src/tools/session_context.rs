@@ -218,7 +218,7 @@ pub async fn execute(
     let last_dream = storage.get_last_dream().ok().flatten();
     let saves_since_last_dream = match &last_dream {
         Some(dt) => storage.count_memories_since(*dt).unwrap_or(0),
-        None => stats.total_nodes as i64,
+        None => stats.total_nodes,
     };
     let last_backup = Storage::get_last_backup_timestamp();
     let now = Utc::now();
@@ -333,40 +333,39 @@ pub async fn execute(
     // ====================================================================
     // 5. Codebase patterns/decisions (if codebase specified)
     // ====================================================================
-    if let Some(ref ctx) = args.context {
-        if let Some(ref codebase) = ctx.codebase {
-            let codebase_tag = format!("codebase:{}", codebase);
-            let mut cb_lines: Vec<String> = Vec::new();
+    if let Some(ref ctx) = args.context
+        && let Some(ref codebase) = ctx.codebase
+    {
+        let codebase_tag = format!("codebase:{}", codebase);
+        let mut cb_lines: Vec<String> = Vec::new();
 
-            // Get patterns
-            if let Ok(patterns) = storage.get_nodes_by_type_and_tag("pattern", Some(&codebase_tag), 3) {
-                for p in &patterns {
-                    let line = format!("- [pattern] {}", first_sentence(&p.content));
-                    let line_len = line.len() + 1;
-                    if char_count + line_len <= budget_chars {
-                        cb_lines.push(line);
-                        char_count += line_len;
-                    }
+        // Get patterns
+        if let Ok(patterns) = storage.get_nodes_by_type_and_tag("pattern", Some(&codebase_tag), 3) {
+            for p in &patterns {
+                let line = format!("- [pattern] {}", first_sentence(&p.content));
+                let line_len = line.len() + 1;
+                if char_count + line_len <= budget_chars {
+                    cb_lines.push(line);
+                    char_count += line_len;
                 }
             }
+        }
 
-            // Get decisions
-            if let Ok(decisions) =
-                storage.get_nodes_by_type_and_tag("decision", Some(&codebase_tag), 3)
-            {
-                for d in &decisions {
-                    let line = format!("- [decision] {}", first_sentence(&d.content));
-                    let line_len = line.len() + 1;
-                    if char_count + line_len <= budget_chars {
-                        cb_lines.push(line);
-                        char_count += line_len;
-                    }
+        // Get decisions
+        if let Ok(decisions) = storage.get_nodes_by_type_and_tag("decision", Some(&codebase_tag), 3)
+        {
+            for d in &decisions {
+                let line = format!("- [decision] {}", first_sentence(&d.content));
+                let line_len = line.len() + 1;
+                if char_count + line_len <= budget_chars {
+                    cb_lines.push(line);
+                    char_count += line_len;
                 }
             }
+        }
 
-            if !cb_lines.is_empty() {
-                context_parts.push(format!("**Codebase ({}):**\n{}", codebase, cb_lines.join("\n")));
-            }
+        if !cb_lines.is_empty() {
+            context_parts.push(format!("**Codebase ({}):**\n{}", codebase, cb_lines.join("\n")));
         }
     }
 
@@ -404,10 +403,10 @@ fn check_intention_triggered(
 
     match trigger.trigger_type.as_deref() {
         Some("time") => {
-            if let Some(ref at) = trigger.at {
-                if let Ok(trigger_time) = DateTime::parse_from_rfc3339(at) {
-                    return trigger_time.with_timezone(&Utc) <= now;
-                }
+            if let Some(ref at) = trigger.at
+                && let Ok(trigger_time) = DateTime::parse_from_rfc3339(at)
+            {
+                return trigger_time.with_timezone(&Utc) <= now;
             }
             if let Some(mins) = trigger.in_minutes {
                 let trigger_time = intention.created_at + Duration::minutes(mins);
@@ -418,28 +417,25 @@ fn check_intention_triggered(
         Some("context") => {
             // Check codebase match
             if let (Some(trigger_cb), Some(current_cb)) = (&trigger.codebase, &ctx.codebase)
-            {
-                if current_cb
+                && current_cb
                     .to_lowercase()
                     .contains(&trigger_cb.to_lowercase())
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             // Check file pattern match
-            if let (Some(pattern), Some(file)) = (&trigger.file_pattern, &ctx.file) {
-                if file.contains(pattern.as_str()) {
-                    return true;
-                }
+            if let (Some(pattern), Some(file)) = (&trigger.file_pattern, &ctx.file)
+                && file.contains(pattern.as_str())
+            {
+                return true;
             }
             // Check topic match
-            if let (Some(topic), Some(topics)) = (&trigger.topic, &ctx.topics) {
-                if topics
+            if let (Some(topic), Some(topics)) = (&trigger.topic, &ctx.topics)
+                && topics
                     .iter()
                     .any(|t| t.to_lowercase().contains(&topic.to_lowercase()))
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             false
         }
