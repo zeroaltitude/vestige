@@ -72,10 +72,10 @@ pub async fn execute(
 
     if let Some(ref memory_id) = args.memory_id {
         // Per-memory mode: state transitions for a specific memory
-        execute_per_memory(&storage, memory_id, limit)
+        execute_per_memory(storage, memory_id, limit)
     } else {
         // System-wide mode: consolidations + recent transitions
-        execute_system_wide(&storage, limit)
+        execute_system_wide(storage, limit)
     }
 }
 
