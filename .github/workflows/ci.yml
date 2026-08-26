@@ -47,6 +47,39 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  msrv:
+    name: MSRV (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Keep in sync with [workspace.package] rust-version in Cargo.toml.
+        rust: ["1.91"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-msrv-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-${{ matrix.rust }}-cargo-
+
+      # Compile only. Clippy and tests stay on stable; this job exists solely to
+      # prove the declared floor still builds, so the rust-version key is not a
+      # decoration.
+      - name: Check
+        run: cargo check --workspace
+
   dashboard:
     name: Dashboard Build
     runs-on: ubuntu-latest
