@@ -83,6 +83,21 @@ if (!fs.existsSync(targetDir)) {
 }
 
 /**
+ * Remove the file we opened for a download that never produced bytes.
+ *
+ * Synchronous on purpose: main() calls process.exit(1) from its catch handler, so a
+ * callback-based fs.unlink is never given a chance to run and the empty archive survives.
+ */
+function discardPartialFile(file, dest) {
+  file.destroy();
+  try {
+    fs.unlinkSync(dest);
+  } catch {
+    // Already gone, or never created — nothing to clean up.
+  }
+}
+
+/**
  * Download a file following redirects (GitHub releases use redirects)
  */
 function download(url, dest) {
@@ -103,6 +118,7 @@ function download(url, dest) {
         }
 
         if (response.statusCode !== 200) {
+          discardPartialFile(file, dest);
           reject(new Error(`Download failed: HTTP ${response.statusCode}`));
           return;
         }
@@ -113,7 +129,7 @@ function download(url, dest) {
           resolve();
         });
       }).on('error', (err) => {
-        fs.unlink(dest, () => {}); // Delete partial file
+        discardPartialFile(file, dest); // Delete partial file
         reject(err);
       });
     };
