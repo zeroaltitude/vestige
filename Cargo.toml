@@ -12,6 +12,12 @@ exclude = [
 [workspace.package]
 version = "1.9.2"
 edition = "2024"
+# Real floor for the workspace, verified by the `msrv` CI job. Edition 2024
+# alone only needs 1.85, but vestige-mcp calls str::floor_char_boundary, whose
+# `round_char_boundary` feature stabilized in 1.91. Every member inherits this
+# via `rust-version.workspace = true` so the declared floor and the real floor
+# cannot drift apart per-crate.
+rust-version = "1.91"
 license = "AGPL-3.0-only"
 repository = "https://github.com/samvallad33/vestige"
 authors = ["Sam Valladares"]
