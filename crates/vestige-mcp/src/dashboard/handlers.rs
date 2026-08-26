@@ -800,9 +800,10 @@ pub async fn trigger_consolidation(
 
     let start = std::time::Instant::now();
 
-    let result = state
-        .storage
-        .run_consolidation()
+    let storage = state.storage.clone();
+    let result = tokio::task::spawn_blocking(move || storage.run_consolidation())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let duration_ms = start.elapsed().as_millis() as u64;

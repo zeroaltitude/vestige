@@ -11,13 +11,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
+  # Clippy is a separate job on purpose. As a step ahead of Test in the `test`
+  # job, a lint failure made GitHub skip Test — so the workspace suite silently
+  # stopped running while the rollup only ever said "red". As its own job it can
+  # fail without deciding whether the tests get to report.
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -35,23 +35,74 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
+          key: ${{ runner.os }}-clippy-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check
         run: cargo check --workspace
 
-      # Test runs BEFORE Clippy on purpose. These steps are independent, but a
-      # failing `-D warnings` gate ahead of Test silently skips it — which is how
-      # the full-workspace suite sat un-run for months while the job merely looked
-      # red for lint reasons. The toolchain is pinned to @stable, so new clippy
-      # lints arrive on their own schedule and would re-arm that trap. Clippy still
-      # gates the job; it just no longer decides whether the tests get to report.
       - name: Test
         run: cargo test --workspace
 
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+  feature-matrix:
+    name: Feature Matrix (no vector-search)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-featurematrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-featurematrix-
+
+      # Guards against gated modules (e.g. `search`, `embeddings`) being imported
+      # unconditionally. The default job builds every feature, so such an import
+      # compiles there and only breaks the configurations exercised below.
+      - name: Check (bundled-sqlite only)
+        run: cargo check -p vestige-core --no-default-features --features bundled-sqlite
+
+      - name: Check (bundled-sqlite + embeddings, no vector-search)
+        run: cargo check -p vestige-core --no-default-features --features bundled-sqlite,embeddings
 
   dashboard:
     name: Dashboard Build
@@ -69,7 +120,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: apps/dashboard/pnpm-lock.yaml
+          # The dashboard has no lockfile of its own — apps/dashboard is a member of the
+          # pnpm workspace, so the only lockfile is the one at the repo root. Pointing at
+          # apps/dashboard/pnpm-lock.yaml matched nothing and failed this step outright
+          # with "Some specified paths were not resolved, unable to cache dependencies."
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -83,7 +138,7 @@ jobs:
     name: Release Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     if: github.ref == 'refs/heads/main'
-    needs: [test, dashboard]
+    needs: [clippy, test, dashboard]
     strategy:
       fail-fast: false
       matrix:

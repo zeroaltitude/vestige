@@ -1276,14 +1276,12 @@ impl MemoryStateInfo {
                     }
                 }
             }
-            MemoryState::Dormant => {
-                if duration_since_access.num_days() > 20 {
-                    recommendations.push(
-                        "Consider accessing this memory soon to prevent it from \
-                         becoming harder to retrieve."
-                            .to_string(),
-                    );
-                }
+            MemoryState::Dormant if duration_since_access.num_days() > 20 => {
+                recommendations.push(
+                    "Consider accessing this memory soon to prevent it from \
+                     becoming harder to retrieve."
+                        .to_string(),
+                );
             }
             _ => {}
         }

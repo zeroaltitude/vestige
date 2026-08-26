@@ -175,7 +175,7 @@ fn execute_system_wide(
     }
 
     // Sort by timestamp descending
-    events.sort_by(|a, b| b.0.cmp(&a.0));
+    events.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     // Truncate to limit
     events.truncate(limit as usize);

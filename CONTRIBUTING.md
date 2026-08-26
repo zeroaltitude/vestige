@@ -43,27 +43,44 @@ cd apps/dashboard && pnpm install && pnpm build && cd ../..
 cargo build
 
 # Run tests
-VESTIGE_TEST_MOCK_EMBEDDINGS=1 cargo test --workspace
+cargo test --workspace
 ```
+
+> **Heads up: tests use the real embedding model.** There is no mock-embeddings
+> switch. Any test that ingests a memory goes through `Storage::ingest` →
+> `EmbeddingService::is_ready()`, which initializes fastembed's
+> `nomic-embed-text-v1.5` and downloads ~522 MB into the cache directory on a
+> cold run. If the download fails, `is_ready()` returns `false` and the tests
+> still pass — with embeddings silently disabled, after a ~30 s stall. Set
+> `FASTEMBED_CACHE_PATH` to a persistent directory to avoid re-downloading.
 
 ### Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
-| `VESTIGE_TEST_MOCK_EMBEDDINGS=1` | Use mock embeddings in tests (skips ONNX model download) |
-| `VESTIGE_DB_PATH` | Override default database path (`~/.vestige/vestige.db`) |
+| `FASTEMBED_CACHE_PATH` | Where the fastembed ONNX model is cached. Defaults to the platform cache dir (Linux: `~/.cache/core/fastembed`) |
+| `VESTIGE_RETENTION_TARGET` | Retention threshold used by health reporting (default `0.8`) |
+| `VESTIGE_CONSOLIDATION_INTERVAL_HOURS` | Background consolidation interval (default `6`) |
+| `VESTIGE_DASHBOARD_PORT` | Dashboard HTTP port (default `3927`) |
+| `VESTIGE_ENCRYPTION_KEY` | SQLCipher key. Only read when built with `--features encryption` |
+| `RUST_LOG` | Log level filter (e.g. `debug`, `info`, `warn`) |
+
+The database path is **not** environment-configurable — use the
+`--data-dir <PATH>` flag on `vestige-mcp`.
 
 ## Running Tests
 
 ```bash
 # All tests (734 total)
-VESTIGE_TEST_MOCK_EMBEDDINGS=1 cargo test --workspace
+cargo test --workspace
 
 # Core library tests only (352 tests)
-VESTIGE_TEST_MOCK_EMBEDDINGS=1 cargo test -p vestige-core --lib
+cargo test -p vestige-core --lib
 
-# MCP server tests only (378 tests)
-VESTIGE_TEST_MOCK_EMBEDDINGS=1 cargo test -p vestige-mcp --lib
+# MCP server tests only (378 tests).
+# `--bin vestige-mcp` is load-bearing: lib.rs exposes only `cognitive` and
+# `dashboard`, so `--lib` alone reports "0 passed" and exits 0.
+cargo test -p vestige-mcp --bin vestige-mcp
 
 # E2E MCP protocol tests (requires release build)
 cargo build --release -p vestige-mcp
@@ -165,7 +182,7 @@ SvelteKit 2 + Three.js + Tailwind CSS. Pages:
 
 - [ ] `cargo fmt --all` — code is formatted
 - [ ] `cargo clippy --workspace -- -D warnings` — zero warnings
-- [ ] `VESTIGE_TEST_MOCK_EMBEDDINGS=1 cargo test --workspace` — all tests pass
+- [ ] `cargo test --workspace` — all tests pass
 - [ ] Dashboard builds (if modified): `cd apps/dashboard && pnpm build`
 - [ ] No secrets, API keys, or credentials in code
 

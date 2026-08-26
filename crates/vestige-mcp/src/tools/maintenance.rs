@@ -369,7 +369,11 @@ pub async fn execute_consolidate(
     storage: &Arc<Storage>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let result = storage.run_consolidation().map_err(|e| e.to_string())?;
+    let storage = Arc::clone(storage);
+    let result = tokio::task::spawn_blocking(move || storage.run_consolidation())
+        .await
+        .map_err(|e| format!("Consolidation task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
         "tool": "consolidate",
@@ -740,8 +744,11 @@ pub async fn execute_export(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GcArgs {
+    #[serde(alias = "min_retention")]
     min_retention: Option<f64>,
+    #[serde(alias = "max_age_days")]
     max_age_days: Option<u64>,
+    #[serde(alias = "dry_run")]
     dry_run: Option<bool>,
 }
 
@@ -878,6 +885,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
         (Arc::new(storage), dir)
+    }
+
+    /// gc_schema() advertises min_retention / max_age_days / dry_run; GcArgs is
+    /// camelCase. Both spellings must reach the same fields — a dropped
+    /// `dry_run: true` would turn a dry run into a real delete.
+    #[test]
+    fn test_gc_args_accept_both_spellings() {
+        let snake: GcArgs = serde_json::from_value(serde_json::json!({
+            "min_retention": 0.2,
+            "max_age_days": 90,
+            "dry_run": false,
+        }))
+        .unwrap();
+        let camel: GcArgs = serde_json::from_value(serde_json::json!({
+            "minRetention": 0.2,
+            "maxAgeDays": 90,
+            "dryRun": false,
+        }))
+        .unwrap();
+
+        assert_eq!(snake.min_retention, Some(0.2));
+        assert_eq!(snake.max_age_days, Some(90));
+        assert_eq!(snake.dry_run, Some(false));
+
+        assert_eq!(snake.min_retention, camel.min_retention);
+        assert_eq!(snake.max_age_days, camel.max_age_days);
+        assert_eq!(snake.dry_run, camel.dry_run);
     }
 
     #[test]

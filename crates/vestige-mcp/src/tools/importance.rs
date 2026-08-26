@@ -42,6 +42,7 @@ pub fn schema() -> Value {
 #[serde(rename_all = "camelCase")]
 struct ImportanceArgs {
     content: String,
+    #[serde(alias = "context_topics")]
     context_topics: Option<Vec<String>>,
     project: Option<String>,
 }
@@ -122,6 +123,28 @@ mod tests {
 
     fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
         Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
+
+    /// schema() advertises `context_topics`; ImportanceArgs is camelCase.
+    /// Both spellings must reach the same field.
+    #[test]
+    fn test_args_accept_both_spellings() {
+        let snake: ImportanceArgs = serde_json::from_value(serde_json::json!({
+            "content": "c",
+            "context_topics": ["a", "b"],
+        }))
+        .unwrap();
+        let camel: ImportanceArgs = serde_json::from_value(serde_json::json!({
+            "content": "c",
+            "contextTopics": ["a", "b"],
+        }))
+        .unwrap();
+
+        assert_eq!(
+            snake.context_topics,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(snake.context_topics, camel.context_topics);
     }
 
     #[test]
