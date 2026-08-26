@@ -700,8 +700,8 @@ impl McpServer {
                     let _expired = cog.reconsolidation.reconsolidate_expired();
                 }
 
-                match storage_clone.run_consolidation() {
-                    Ok(result) => {
+                match tokio::task::spawn_blocking(move || storage_clone.run_consolidation()).await {
+                    Ok(Ok(result)) => {
                         tracing::info!(
                             tool_calls = count,
                             decay_applied = result.decay_applied,
@@ -711,8 +711,11 @@ impl McpServer {
                             "Inline consolidation triggered (scheduler)"
                         );
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::warn!("Inline consolidation failed: {}", e);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Inline consolidation task panicked: {}", e);
                     }
                 }
             });

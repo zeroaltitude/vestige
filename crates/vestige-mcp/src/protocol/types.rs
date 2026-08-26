@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// MCP Protocol Version
-pub const MCP_VERSION: &str = "2025-11-25";
+/// MCP spec version — "2025-03-26" is the latest official version
+/// that includes Streamable HTTP transport support.
+pub const MCP_VERSION: &str = "2025-03-26";
 
 /// JSON-RPC version
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -125,6 +127,10 @@ impl JsonRpcError {
 
     pub fn server_not_initialized() -> Self {
         Self::new(ErrorCode::ServerNotInitialized, "Server not initialized")
+    }
+
+    pub fn no_valid_session() -> Self {
+        Self::new(ErrorCode::ServerNotInitialized, "No valid MCP session — send initialize first")
     }
 
     #[allow(dead_code)] // Reserved for future resource handling
