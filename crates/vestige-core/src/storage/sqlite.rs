@@ -18,16 +18,18 @@ use crate::memory::{
 };
 use crate::keyword::sanitize_fts5_query;
 
-#[cfg(feature = "embeddings")]
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
 use lru::LruCache;
-#[cfg(feature = "embeddings")]
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
 use std::num::NonZeroUsize;
 
 #[cfg(all(feature = "embeddings", feature = "vector-search"))]
 use crate::memory::{EmbeddingResult, MatchType, SearchResult, SimilarityResult};
 
 #[cfg(feature = "embeddings")]
-use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
+use crate::embeddings::EmbeddingService;
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+use crate::embeddings::{matryoshka_truncate, Embedding, EMBEDDING_DIMENSIONS};
 
 #[cfg(feature = "vector-search")]
 use crate::search::{linear_combination, VectorIndex};
@@ -99,7 +101,11 @@ pub struct Storage {
     #[cfg(feature = "vector-search")]
     vector_index: Mutex<VectorIndex>,
     /// LRU cache for query embeddings to avoid re-embedding repeated queries
-    #[cfg(feature = "embeddings")]
+    ///
+    /// Only the semantic/hybrid search paths embed queries, and those are all
+    /// `all(embeddings, vector-search)`, so the cache has no reader in an
+    /// embeddings-only build.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     query_cache: Mutex<LruCache<String, Vec<f32>>>,
 }
 
@@ -183,7 +189,7 @@ impl Storage {
 
         // Initialize LRU cache for query embeddings (capacity: 100 queries)
         // SAFETY: 100 is always non-zero, this cannot fail
-        #[cfg(feature = "embeddings")]
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         let query_cache = Mutex::new(LruCache::new(
             NonZeroUsize::new(100).expect("100 is non-zero"),
         ));
@@ -196,7 +202,7 @@ impl Storage {
             embedding_service,
             #[cfg(feature = "vector-search")]
             vector_index: Mutex::new(vector_index),
-            #[cfg(feature = "embeddings")]
+            #[cfg(all(feature = "embeddings", feature = "vector-search"))]
             query_cache,
         };
 
@@ -1309,7 +1315,18 @@ impl Storage {
     }
 
     /// Get query embedding from cache or compute it
-    #[cfg(feature = "embeddings")]
+    ///
+    /// Gated on `vector-search` as well as `embeddings` to match its callers
+    /// (`semantic_search`, `semantic_search_raw`, `hybrid_search`), which are
+    /// all `all(embeddings, vector-search)`.
+    ///
+    /// This records where the code is today, not an invariant: embedding a
+    /// query does *not* require an index. A brute-force cosine scan over
+    /// `node_embeddings` would need this cache just as much, and that is the
+    /// recommended resolution of openclaw-vestige-ygv, which tracks the fact
+    /// that the embeddings-only build is currently inert. Widening this gate
+    /// back to `embeddings` is expected to be part of that work.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     fn get_query_embedding(&self, query: &str) -> Result<Vec<f32>> {
         // Check cache first
         {
