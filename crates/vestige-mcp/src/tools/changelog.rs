@@ -72,10 +72,10 @@ pub async fn execute(
 
     if let Some(ref memory_id) = args.memory_id {
         // Per-memory mode: state transitions for a specific memory
-        execute_per_memory(&storage, memory_id, limit)
+        execute_per_memory(storage, memory_id, limit)
     } else {
         // System-wide mode: consolidations + recent transitions
-        execute_system_wide(&storage, limit)
+        execute_system_wide(storage, limit)
     }
 }
 
@@ -175,7 +175,7 @@ fn execute_system_wide(
     }
 
     // Sort by timestamp descending
-    events.sort_by(|a, b| b.0.cmp(&a.0));
+    events.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     // Truncate to limit
     events.truncate(limit as usize);

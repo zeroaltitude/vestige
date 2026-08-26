@@ -249,7 +249,7 @@ pub async fn execute_system_status(
     let last_dream = storage.get_last_dream().ok().flatten();
     let saves_since_last_dream = match &last_dream {
         Some(dt) => storage.count_memories_since(*dt).unwrap_or(0),
-        None => stats.total_nodes as i64,
+        None => stats.total_nodes,
     };
     let last_backup = Storage::get_last_backup_timestamp();
 

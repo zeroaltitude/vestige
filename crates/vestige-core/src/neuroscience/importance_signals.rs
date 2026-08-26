@@ -464,7 +464,7 @@ impl PredictionModel {
             .filter_map(|ng| patterns.get(&ng).map(|&count| (ng, count)))
             .collect();
 
-        familiar.sort_by(|a, b| b.1.cmp(&a.1));
+        familiar.sort_by_key(|a| std::cmp::Reverse(a.1));
         familiar.into_iter().take(5).map(|(ng, _)| ng).collect()
     }
 
@@ -489,7 +489,7 @@ impl PredictionModel {
     fn apply_decay(&self, patterns: &mut HashMap<String, u32>) {
         // Remove lowest frequency patterns
         let mut entries: Vec<_> = patterns.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        entries.sort_by(|a, b| a.1.cmp(&b.1));
+        entries.sort_by_key(|a| a.1);
 
         // Remove bottom 20%
         let remove_count = patterns.len() / 5;

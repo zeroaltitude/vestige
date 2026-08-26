@@ -639,7 +639,7 @@ impl Storage {
             .prepare("SELECT * FROM knowledge_nodes WHERE id = ?1")?;
 
         let node = stmt
-            .query_row(params![id], |row| Self::row_to_node(row))
+            .query_row(params![id], Self::row_to_node)
             .optional()?;
         Ok(node)
     }
@@ -1058,7 +1058,7 @@ impl Storage {
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![now, limit], |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params![now, limit], Self::row_to_node)?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1199,7 +1199,7 @@ impl Storage {
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![sanitized_query, limit], |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params![sanitized_query, limit], Self::row_to_node)?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1218,7 +1218,7 @@ impl Storage {
              LIMIT ?1 OFFSET ?2",
         )?;
 
-        let nodes = stmt.query_map(params![limit, offset], |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params![limit, offset], Self::row_to_node)?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1268,7 +1268,7 @@ impl Storage {
                      ORDER BY retention_strength DESC, created_at DESC
                      LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![node_type, limit], |row| Self::row_to_node(row))?;
+                let rows = stmt.query_map(params![node_type, limit], Self::row_to_node)?;
                 let mut nodes = Vec::new();
                 for node in rows.flatten() {
                     nodes.push(node);
@@ -1641,7 +1641,7 @@ impl Storage {
              LIMIT ?2",
         )?;
 
-        let nodes = stmt.query_map(params![timestamp, limit], |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params![timestamp, limit], Self::row_to_node)?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -1704,7 +1704,7 @@ impl Storage {
             .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
         let mut stmt = reader.prepare(query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let nodes = stmt.query_map(params_refs.as_slice(), |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params_refs.as_slice(), Self::row_to_node)?;
 
         let mut result = Vec::new();
         for node in nodes {
@@ -2615,7 +2615,7 @@ impl Storage {
             "SELECT * FROM intentions WHERE id = ?1"
         )?;
 
-        stmt.query_row(params![id], |row| Self::row_to_intention(row))
+        stmt.query_row(params![id], Self::row_to_intention)
             .optional()
             .map_err(StorageError::from)
     }
@@ -2628,7 +2628,7 @@ impl Storage {
             "SELECT * FROM intentions WHERE status = 'active' ORDER BY priority DESC, created_at ASC"
         )?;
 
-        let rows = stmt.query_map([], |row| Self::row_to_intention(row))?;
+        let rows = stmt.query_map([], Self::row_to_intention)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2644,7 +2644,7 @@ impl Storage {
             "SELECT * FROM intentions WHERE status = ?1 ORDER BY priority DESC, created_at ASC"
         )?;
 
-        let rows = stmt.query_map(params![status], |row| Self::row_to_intention(row))?;
+        let rows = stmt.query_map(params![status], Self::row_to_intention)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2683,7 +2683,7 @@ impl Storage {
             "SELECT * FROM intentions WHERE status = 'active' AND deadline IS NOT NULL AND deadline < ?1 ORDER BY deadline ASC"
         )?;
 
-        let rows = stmt.query_map(params![now], |row| Self::row_to_intention(row))?;
+        let rows = stmt.query_map(params![now], Self::row_to_intention)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2775,7 +2775,7 @@ impl Storage {
             "SELECT * FROM insights ORDER BY generated_at DESC LIMIT ?1"
         )?;
 
-        let rows = stmt.query_map(params![limit], |row| Self::row_to_insight(row))?;
+        let rows = stmt.query_map(params![limit], Self::row_to_insight)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2791,7 +2791,7 @@ impl Storage {
             "SELECT * FROM insights WHERE feedback IS NULL ORDER BY novelty_score DESC"
         )?;
 
-        let rows = stmt.query_map([], |row| Self::row_to_insight(row))?;
+        let rows = stmt.query_map([], Self::row_to_insight)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2874,7 +2874,7 @@ impl Storage {
             "SELECT * FROM memory_connections WHERE source_id = ?1 OR target_id = ?1 ORDER BY strength DESC"
         )?;
 
-        let rows = stmt.query_map(params![memory_id], |row| Self::row_to_connection(row))?;
+        let rows = stmt.query_map(params![memory_id], Self::row_to_connection)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2890,7 +2890,7 @@ impl Storage {
             "SELECT * FROM memory_connections ORDER BY strength DESC"
         )?;
 
-        let rows = stmt.query_map([], |row| Self::row_to_connection(row))?;
+        let rows = stmt.query_map([], Self::row_to_connection)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -2988,7 +2988,7 @@ impl Storage {
             "SELECT * FROM memory_states WHERE memory_id = ?1"
         )?;
 
-        stmt.query_row(params![memory_id], |row| Self::row_to_memory_state(row))
+        stmt.query_row(params![memory_id], Self::row_to_memory_state)
             .optional()
             .map_err(StorageError::from)
     }
@@ -3489,7 +3489,7 @@ impl Storage {
         let mut stmt = reader.prepare(
             "SELECT * FROM knowledge_nodes WHERE waking_tag = TRUE ORDER BY waking_tag_at DESC LIMIT ?1"
         )?;
-        let nodes = stmt.query_map(params![limit], |row| Self::row_to_node(row))?;
+        let nodes = stmt.query_map(params![limit], Self::row_to_node)?;
         let mut result = Vec::new();
         for node in nodes {
             result.push(node?);

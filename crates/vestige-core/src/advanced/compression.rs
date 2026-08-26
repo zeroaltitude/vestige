@@ -298,7 +298,7 @@ impl MemoryCompressor {
 
         // Sort by age (oldest first)
         let mut sorted: Vec<_> = memories.iter().collect();
-        sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        sorted.sort_by_key(|a| a.created_at);
 
         for memory in sorted {
             if assigned.contains(&memory.id) {

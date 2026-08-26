@@ -582,7 +582,7 @@ impl UserModel {
         }
 
         // Sort by count and keep top patterns
-        patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        patterns.sort_by_key(|a| std::cmp::Reverse(a.1));
         patterns.truncate(50);
     }
 

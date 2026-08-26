@@ -417,7 +417,7 @@ impl CrossProjectLearner {
             }
         }
 
-        suggestions.sort_by(|a, b| b.priority.cmp(&a.priority));
+        suggestions.sort_by_key(|a| std::cmp::Reverse(a.priority));
         suggestions
     }
 
