@@ -63,7 +63,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: apps/dashboard/pnpm-lock.yaml
+          # The dashboard has no lockfile of its own — apps/dashboard is a member of the
+          # pnpm workspace, so the only lockfile is the one at the repo root. Pointing at
+          # apps/dashboard/pnpm-lock.yaml matched nothing and failed this step outright
+          # with "Some specified paths were not resolved, unable to cache dependencies."
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
