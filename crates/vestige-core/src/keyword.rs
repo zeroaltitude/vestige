@@ -67,8 +67,22 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         return "\"\"".to_string(); // Empty phrase - matches nothing safely
     }
 
-    // Wrap in quotes to treat as literal phrase search
-    format!("\"{}\"", sanitized)
+    // Wrap each remaining token as its own phrase so multi-word queries become an
+    // implicit AND of single-term matches rather than one consecutive phrase. FTS5
+    // then scores each term independently via BM25; the old single-phrase form
+    // required every word to appear adjacently, so ordinary multi-word searches
+    // returned nothing (openclaw-vestige-6ct).
+    let tokens: Vec<String> = sanitized
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t))
+        .collect();
+
+    if tokens.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    tokens.join(" ")
 }
 
 // ============================================================================
@@ -205,21 +219,39 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_basic() {
-        assert_eq!(sanitize_fts5_query("hello world"), "\"hello world\"");
+        // Each token is quoted individually, giving FTS5 an implicit AND of terms
+        // rather than one consecutive phrase.
+        assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" \"world\"");
+        assert_eq!(sanitize_fts5_query("hello"), "\"hello\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_operators() {
-        assert_eq!(sanitize_fts5_query("hello OR world"), "\"hello world\"");
-        assert_eq!(sanitize_fts5_query("hello AND world"), "\"hello world\"");
+        // Boolean operators are stripped; the remaining tokens stay individually quoted.
+        assert_eq!(sanitize_fts5_query("hello OR world"), "\"hello\" \"world\"");
+        assert_eq!(sanitize_fts5_query("hello AND world"), "\"hello\" \"world\"");
         assert_eq!(sanitize_fts5_query("NOT hello"), "\"hello\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_special_chars() {
-        assert_eq!(sanitize_fts5_query("hello* world"), "\"hello world\"");
-        assert_eq!(sanitize_fts5_query("content:secret"), "\"content secret\"");
+        // Special characters are stripped; the remaining tokens stay individually quoted.
+        assert_eq!(sanitize_fts5_query("hello* world"), "\"hello\" \"world\"");
+        assert_eq!(
+            sanitize_fts5_query("content:secret"),
+            "\"content\" \"secret\""
+        );
         assert_eq!(sanitize_fts5_query("^boost"), "\"boost\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_multi_word_is_implicit_and() {
+        // The bug this guards (openclaw-vestige-6ct): a multi-word query must NOT
+        // collapse into a single quoted phrase, which FTS5 only matches when the
+        // words appear consecutively — so an ordinary search returned nothing.
+        let result = sanitize_fts5_query("tell me about Reccy");
+        assert_eq!(result, "\"tell\" \"me\" \"about\" \"Reccy\"");
+        assert_ne!(result, "\"tell me about Reccy\"");
     }
 
     #[test]
