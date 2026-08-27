@@ -561,10 +561,10 @@ impl IntentDetector {
                                 score += 0.2;
                             }
                             ActionType::FileOpened | ActionType::FileEdited => {
-                                if let Some(file) = &action.file {
-                                    if let Some(name) = file.file_name() {
-                                        suspected_area = name.to_string_lossy().to_string();
-                                    }
+                                if let Some(file) = &action.file
+                                    && let Some(name) = file.file_name()
+                                {
+                                    suspected_area = name.to_string_lossy().to_string();
                                 }
                             }
                             _ => {}

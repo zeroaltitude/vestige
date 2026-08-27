@@ -337,12 +337,12 @@ impl CodebaseWatcher {
                                         }
 
                                         // Detect patterns if enabled
-                                        if config.detect_patterns {
-                                            if let Ok(content) = std::fs::read_to_string(path) {
-                                                let language = Self::detect_language(path);
-                                                if let Ok(detector) = detector.try_read() {
-                                                    let _ = detector.detect_patterns(&content, &language);
-                                                }
+                                        if config.detect_patterns
+                                            && let Ok(content) = std::fs::read_to_string(path)
+                                        {
+                                            let language = Self::detect_language(path);
+                                            if let Ok(detector) = detector.try_read() {
+                                                let _ = detector.detect_patterns(&content, &language);
                                             }
                                         }
                                     }
@@ -576,12 +576,12 @@ impl ManualEventHandler {
         }
 
         // Detect patterns
-        if self.config.detect_patterns {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let language = CodebaseWatcher::detect_language(path);
-                let detector = self.detector.read().await;
-                let _ = detector.detect_patterns(&content, &language);
-            }
+        if self.config.detect_patterns
+            && let Ok(content) = std::fs::read_to_string(path)
+        {
+            let language = CodebaseWatcher::detect_language(path);
+            let detector = self.detector.read().await;
+            let _ = detector.detect_patterns(&content, &language);
         }
 
         Ok(())

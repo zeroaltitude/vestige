@@ -230,12 +230,11 @@ impl ImportanceTracker {
         self.on_retrieved(memory_id, was_helpful);
 
         // Store context with event
-        if let Ok(mut events) = self.recent_events.write() {
-            if let Some(event) = events.last_mut() {
-                if event.memory_id == memory_id {
-                    event.context = Some(context.to_string());
-                }
-            }
+        if let Ok(mut events) = self.recent_events.write()
+            && let Some(event) = events.last_mut()
+            && event.memory_id == memory_id
+        {
+            event.context = Some(context.to_string());
         }
     }
 

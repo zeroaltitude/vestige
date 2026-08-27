@@ -1266,14 +1266,14 @@ impl MemoryStateInfo {
                 );
             }
             MemoryState::Unavailable => {
-                if let Some(until) = lifecycle.suppression_until {
-                    if until > now {
-                        recommendations.push(format!(
-                            "This memory is temporarily suppressed. \
+                if let Some(until) = lifecycle.suppression_until
+                    && until > now
+                {
+                    recommendations.push(format!(
+                        "This memory is temporarily suppressed. \
                              It will become accessible again after {}.",
-                            until.format("%Y-%m-%d %H:%M UTC")
-                        ));
-                    }
+                        until.format("%Y-%m-%d %H:%M UTC")
+                    ));
                 }
             }
             MemoryState::Dormant if duration_since_access.num_days() > 20 => {

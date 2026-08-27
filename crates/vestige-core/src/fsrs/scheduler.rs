@@ -241,16 +241,12 @@ impl FSRSScheduler {
         };
 
         // Apply sentiment boost
-        if self.enable_sentiment_boost {
-            if let Some(sentiment) = sentiment_boost {
-                if sentiment > 0.0 {
-                    new_state.stability = apply_sentiment_boost(
-                        new_state.stability,
-                        sentiment,
-                        self.max_sentiment_boost,
-                    );
-                }
-            }
+        if self.enable_sentiment_boost
+            && let Some(sentiment) = sentiment_boost
+            && sentiment > 0.0
+        {
+            new_state.stability =
+                apply_sentiment_boost(new_state.stability, sentiment, self.max_sentiment_boost);
         }
 
         let mut interval =

@@ -274,10 +274,10 @@ impl GitAnalyzer {
                 if let Some(path) = delta.new_file().path() {
                     files.push(path.to_path_buf());
                 }
-                if let Some(path) = delta.old_file().path() {
-                    if !files.contains(&path.to_path_buf()) {
-                        files.push(path.to_path_buf());
-                    }
+                if let Some(path) = delta.old_file().path()
+                    && !files.contains(&path.to_path_buf())
+                {
+                    files.push(path.to_path_buf());
                 }
             }
         }
@@ -492,10 +492,10 @@ impl GitAnalyzer {
                 .single()
                 .unwrap_or_else(Utc::now);
 
-            if let Some(since_time) = since {
-                if commit_time < since_time {
-                    continue;
-                }
+            if let Some(since_time) = since
+                && commit_time < since_time
+            {
+                continue;
             }
 
             let message = commit.message().map(|m| m.to_string()).unwrap_or_default();

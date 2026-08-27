@@ -265,12 +265,12 @@ impl SpeculativeRetriever {
         }
 
         // Update file-memory associations
-        if let Some(file) = file_context {
-            if let Ok(mut map) = self.file_memory_map.write() {
-                map.entry(file.to_string())
-                    .or_insert_with(Vec::new)
-                    .push(memory_id.to_string());
-            }
+        if let Some(file) = file_context
+            && let Ok(mut map) = self.file_memory_map.write()
+        {
+            map.entry(file.to_string())
+                .or_insert_with(Vec::new)
+                .push(memory_id.to_string());
         }
     }
 

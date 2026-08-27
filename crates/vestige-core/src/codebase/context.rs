@@ -586,10 +586,10 @@ impl ContextCapture {
         }
 
         // Java Spring
-        if let Ok(content) = fs::read_to_string(self.project_root.join("pom.xml")) {
-            if content.contains("spring") {
-                frameworks.push(Framework::Spring);
-            }
+        if let Ok(content) = fs::read_to_string(self.project_root.join("pom.xml"))
+            && content.contains("spring")
+        {
+            frameworks.push(Framework::Spring);
         }
 
         // Ruby Rails
@@ -613,40 +613,39 @@ impl ContextCapture {
     /// Detect the project name from config files
     fn detect_project_name(&self) -> Result<Option<String>> {
         // Try Cargo.toml
-        if let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml")) {
-            if let Some(name) = self.extract_toml_value(&content, "name") {
-                return Ok(Some(name));
-            }
+        if let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml"))
+            && let Some(name) = self.extract_toml_value(&content, "name")
+        {
+            return Ok(Some(name));
         }
 
         // Try package.json
-        if let Ok(content) = fs::read_to_string(self.project_root.join("package.json")) {
-            if let Some(name) = self.extract_json_value(&content, "name") {
-                return Ok(Some(name));
-            }
+        if let Ok(content) = fs::read_to_string(self.project_root.join("package.json"))
+            && let Some(name) = self.extract_json_value(&content, "name")
+        {
+            return Ok(Some(name));
         }
 
         // Try pyproject.toml
-        if let Ok(content) = fs::read_to_string(self.project_root.join("pyproject.toml")) {
-            if let Some(name) = self.extract_toml_value(&content, "name") {
-                return Ok(Some(name));
-            }
+        if let Ok(content) = fs::read_to_string(self.project_root.join("pyproject.toml"))
+            && let Some(name) = self.extract_toml_value(&content, "name")
+        {
+            return Ok(Some(name));
         }
 
         // Try go.mod
-        if let Ok(content) = fs::read_to_string(self.project_root.join("go.mod")) {
-            if let Some(line) = content.lines().next() {
-                if line.starts_with("module ") {
-                    let name = line
-                        .trim_start_matches("module ")
-                        .split('/')
-                        .next_back()
-                        .unwrap_or("")
-                        .to_string();
-                    if !name.is_empty() {
-                        return Ok(Some(name));
-                    }
-                }
+        if let Ok(content) = fs::read_to_string(self.project_root.join("go.mod"))
+            && let Some(line) = content.lines().next()
+            && line.starts_with("module ")
+        {
+            let name = line
+                .trim_start_matches("module ")
+                .split('/')
+                .next_back()
+                .unwrap_or("")
+                .to_string();
+            if !name.is_empty() {
+                return Ok(Some(name));
             }
         }
 
@@ -734,15 +733,15 @@ impl ContextCapture {
             // Check test directories
             for test_dir in test_dirs {
                 let test_path = self.project_root.join(test_dir);
-                if test_path.exists() {
-                    if let Ok(entries) = fs::read_dir(&test_path) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let entry_path = entry.path();
-                            if let Some(entry_stem) = entry_path.file_stem() {
-                                let entry_stem = entry_stem.to_string_lossy();
-                                if entry_stem.contains(&stem) {
-                                    related.push(entry_path);
-                                }
+                if test_path.exists()
+                    && let Ok(entries) = fs::read_dir(&test_path)
+                {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        let entry_path = entry.path();
+                        if let Some(entry_stem) = entry_path.file_stem() {
+                            let entry_stem = entry_stem.to_string_lossy();
+                            if entry_stem.contains(&stem) {
+                                related.push(entry_path);
                             }
                         }
                     }
@@ -799,20 +798,19 @@ impl ContextCapture {
     /// Detect the module a file belongs to
     fn detect_module(&self, path: &Path) -> Option<String> {
         // For Rust, use the parent directory name relative to src/
-        if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            if let Ok(relative) = path.strip_prefix(&self.project_root) {
-                if let Ok(src_relative) = relative.strip_prefix("src") {
-                    // Get the module path
-                    let components: Vec<_> = src_relative
-                        .parent()?
-                        .components()
-                        .map(|c| c.as_os_str().to_string_lossy().to_string())
-                        .collect();
+        if path.extension().map(|e| e == "rs").unwrap_or(false)
+            && let Ok(relative) = path.strip_prefix(&self.project_root)
+            && let Ok(src_relative) = relative.strip_prefix("src")
+        {
+            // Get the module path
+            let components: Vec<_> = src_relative
+                .parent()?
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                .collect();
 
-                    if !components.is_empty() {
-                        return Some(components.join("::"));
-                    }
-                }
+            if !components.is_empty() {
+                return Some(components.join("::"));
             }
         }
 
@@ -821,19 +819,18 @@ impl ContextCapture {
             .extension()
             .map(|e| e == "ts" || e == "tsx" || e == "js" || e == "jsx")
             .unwrap_or(false)
+            && let Ok(relative) = path.strip_prefix(&self.project_root)
         {
-            if let Ok(relative) = path.strip_prefix(&self.project_root) {
-                // Skip src/ or lib/ prefix
-                let relative = relative
-                    .strip_prefix("src")
-                    .or_else(|_| relative.strip_prefix("lib"))
-                    .unwrap_or(relative);
+            // Skip src/ or lib/ prefix
+            let relative = relative
+                .strip_prefix("src")
+                .or_else(|_| relative.strip_prefix("lib"))
+                .unwrap_or(relative);
 
-                if let Some(parent) = relative.parent() {
-                    let module = parent.to_string_lossy().replace('/', ".");
-                    if !module.is_empty() {
-                        return Some(module);
-                    }
+            if let Some(parent) = relative.parent() {
+                let module = parent.to_string_lossy().replace('/', ".");
+                if !module.is_empty() {
+                    return Some(module);
                 }
             }
         }
@@ -874,13 +871,12 @@ impl ContextCapture {
     fn extract_toml_value(&self, content: &str, key: &str) -> Option<String> {
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with(&format!("{} ", key))
-                || trimmed.starts_with(&format!("{}=", key))
+            if (trimmed.starts_with(&format!("{} ", key))
+                || trimmed.starts_with(&format!("{}=", key)))
+                && let Some(value) = trimmed.split('=').nth(1)
             {
-                if let Some(value) = trimmed.split('=').nth(1) {
-                    let value = value.trim().trim_matches('"').trim_matches('\'');
-                    return Some(value.to_string());
-                }
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                return Some(value.to_string());
             }
         }
         None
