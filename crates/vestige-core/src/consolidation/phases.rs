@@ -659,19 +659,19 @@ impl DreamEngine {
             if indices.len() >= 3 && indices.len() <= 10 {
                 pattern_count += 1;
                 // Create a connection between the first and last memory sharing this pattern
-                if let (Some(&first), Some(&last)) = (indices.first(), indices.last()) {
-                    if first != last {
-                        connections.push(CreativeConnection {
-                            memory_a_id: triaged[first].id.clone(),
-                            memory_b_id: triaged[last].id.clone(),
-                            insight: format!(
-                                "Shared pattern '{}  {}' found across {} memories",
-                                bigram.0, bigram.1, indices.len()
-                            ),
-                            confidence: (indices.len() as f64 / triaged.len() as f64).min(1.0),
-                            connection_type: CreativeConnectionType::CrossDomain,
-                        });
-                    }
+                if let (Some(&first), Some(&last)) = (indices.first(), indices.last())
+                    && first != last
+                {
+                    connections.push(CreativeConnection {
+                        memory_a_id: triaged[first].id.clone(),
+                        memory_b_id: triaged[last].id.clone(),
+                        insight: format!(
+                            "Shared pattern '{}  {}' found across {} memories",
+                            bigram.0, bigram.1, indices.len()
+                        ),
+                        confidence: (indices.len() as f64 / triaged.len() as f64).min(1.0),
+                        connection_type: CreativeConnectionType::CrossDomain,
+                    });
                 }
             }
         }

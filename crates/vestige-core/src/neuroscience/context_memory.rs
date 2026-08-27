@@ -910,38 +910,38 @@ impl ContextMatcher {
         let mut score = 0.0;
 
         // Same session is a very strong match
-        if let (Some(e_id), Some(r_id)) = (&encoding.session_id, &retrieval.session_id) {
-            if e_id == r_id {
-                return 1.0;
-            }
+        if let (Some(e_id), Some(r_id)) = (&encoding.session_id, &retrieval.session_id)
+            && e_id == r_id
+        {
+            return 1.0;
         }
 
         // Project match (0.4 weight)
-        if let (Some(e_proj), Some(r_proj)) = (&encoding.project, &retrieval.project) {
-            if e_proj == r_proj {
-                score += 0.4;
-            }
+        if let (Some(e_proj), Some(r_proj)) = (&encoding.project, &retrieval.project)
+            && e_proj == r_proj
+        {
+            score += 0.4;
         }
 
         // Activity type match (0.3 weight)
-        if let (Some(e_act), Some(r_act)) = (&encoding.activity_type, &retrieval.activity_type) {
-            if e_act == r_act {
-                score += 0.3;
-            }
+        if let (Some(e_act), Some(r_act)) = (&encoding.activity_type, &retrieval.activity_type)
+            && e_act == r_act
+        {
+            score += 0.3;
         }
 
         // Git branch match (0.2 weight)
-        if let (Some(e_br), Some(r_br)) = (&encoding.git_branch, &retrieval.git_branch) {
-            if e_br == r_br {
-                score += 0.2;
-            }
+        if let (Some(e_br), Some(r_br)) = (&encoding.git_branch, &retrieval.git_branch)
+            && e_br == r_br
+        {
+            score += 0.2;
         }
 
         // Active file match (0.1 weight)
-        if let (Some(e_file), Some(r_file)) = (&encoding.active_file, &retrieval.active_file) {
-            if e_file == r_file {
-                score += 0.1;
-            }
+        if let (Some(e_file), Some(r_file)) = (&encoding.active_file, &retrieval.active_file)
+            && e_file == r_file
+        {
+            score += 0.1;
         }
 
         score

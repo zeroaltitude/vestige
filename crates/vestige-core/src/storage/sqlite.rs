@@ -2455,11 +2455,11 @@ impl Storage {
     /// Generate missing embeddings
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     fn generate_missing_embeddings(&self) -> Result<i64> {
-        if !self.embedding_service.is_ready() {
-            if let Err(e) = self.embedding_service.init() {
-                tracing::warn!("Could not initialize embedding model: {}", e);
-                return Ok(0);
-            }
+        if !self.embedding_service.is_ready()
+            && let Err(e) = self.embedding_service.init()
+        {
+            tracing::warn!("Could not initialize embedding model: {}", e);
+            return Ok(0);
         }
 
         let nodes: Vec<(String, String)> = {
@@ -3312,12 +3312,14 @@ impl Storage {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 // Parse vestige-YYYYMMDD-HHMMSS.db
-                if let Some(ts_part) = name_str.strip_prefix("vestige-").and_then(|s| s.strip_suffix(".db")) {
-                    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts_part, "%Y%m%d-%H%M%S") {
-                        let dt = naive.and_utc();
-                        if latest.as_ref().is_none_or(|l| dt > *l) {
-                            latest = Some(dt);
-                        }
+                if let Some(ts_part) =
+                    name_str.strip_prefix("vestige-").and_then(|s| s.strip_suffix(".db"))
+                    && let Ok(naive) =
+                        chrono::NaiveDateTime::parse_from_str(ts_part, "%Y%m%d-%H%M%S")
+                {
+                    let dt = naive.and_utc();
+                    if latest.as_ref().is_none_or(|l| dt > *l) {
+                        latest = Some(dt);
                     }
                 }
             }

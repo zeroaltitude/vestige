@@ -358,17 +358,17 @@ impl PredictionModel {
     fn learn(&self, content: &str) {
         let ngrams = self.extract_ngrams(content);
 
-        if let Ok(mut patterns) = self.patterns.write() {
-            if let Ok(mut total) = self.total_count.write() {
-                for ngram in ngrams {
-                    *patterns.entry(ngram).or_insert(0) += 1;
-                    *total += 1;
-                }
+        if let Ok(mut patterns) = self.patterns.write()
+            && let Ok(mut total) = self.total_count.write()
+        {
+            for ngram in ngrams {
+                *patterns.entry(ngram).or_insert(0) += 1;
+                *total += 1;
+            }
 
-                // Prune if too large
-                if patterns.len() > MAX_PREDICTION_PATTERNS {
-                    self.apply_decay(&mut patterns);
-                }
+            // Prune if too large
+            if patterns.len() > MAX_PREDICTION_PATTERNS {
+                self.apply_decay(&mut patterns);
             }
         }
     }
