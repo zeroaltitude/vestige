@@ -185,9 +185,8 @@ async fn handle_post(
         Some(resp) => {
             let json = serde_json::to_string(&resp).unwrap_or_else(|e| {
                 error!("Failed to serialize response: {}", e);
-                format!(
-                    r#"{{"jsonrpc":"2.0","id":null,"error":{{"code":-32603,"message":"Internal error"}}}}"#
-                )
+                r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}"#
+                    .to_string()
             });
 
             // Check Accept header to decide response format
