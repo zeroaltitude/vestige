@@ -47,6 +47,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 // ============================================================================
 // CONSTANTS
@@ -60,12 +61,105 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.75;
 /// Above this = definitely update, not create
 const NEAR_IDENTICAL_THRESHOLD: f32 = 0.92;
 
-/// Threshold for "correction" detection
-/// When new content contradicts existing with high similarity
-const CORRECTION_THRESHOLD: f32 = 0.70;
+/// Threshold for "correction" detection.
+///
+/// Supersede is the only *destructive* decision this gate can make: the caller
+/// (`Storage::smart_ingest`) responds to it by demoting the old node's FSRS
+/// strengths, which is unrecorded and not automatically reversible. It must
+/// therefore demand **more** evidence than a plain update, not less. Until
+/// `openclaw-vestige-1de` this sat at 0.70 — below `DEFAULT_SIMILARITY_THRESHOLD`
+/// — so the destructive branch was strictly easier to reach than the safe one.
+const CORRECTION_THRESHOLD: f32 = 0.85;
+
+/// Minimum lexical overlap (Jaccard over content words) between the new text
+/// and the candidate before *any* supersede may fire.
+///
+/// Embedding similarity alone cannot tell "this corrects that" apart from
+/// "these are two different notes about the same project": two lesson notes on
+/// one codebase land around 0.75-0.85 while sharing no facts at all. Concrete
+/// token overlap is what separates the two cases.
+const MIN_CONTENT_OVERLAP: f32 = 0.25;
+
+/// Minimum token length for a word to count toward lexical overlap.
+/// Discards most English function words on its own; [`OVERLAP_STOPWORDS`]
+/// catches the longer ones that slip through.
+const MIN_OVERLAP_TOKEN_LEN: usize = 4;
 
 /// Maximum candidates to consider for update
 const MAX_UPDATE_CANDIDATES: usize = 5;
+
+/// Common 4+ letter fillers that survive `MIN_OVERLAP_TOKEN_LEN` but carry no
+/// topical signal, so they would inflate the overlap score.
+const OVERLAP_STOPWORDS: &[&str] = &[
+    "about", "also", "because", "been", "before", "both", "could", "does", "each", "from", "have",
+    "here", "into", "just", "like", "made", "make", "many", "more", "most", "much", "must", "only",
+    "other", "over", "same", "should", "some", "such", "than", "that", "their", "them", "then",
+    "there", "these", "they", "this", "those", "through", "very", "were", "what", "when", "where",
+    "which", "while", "will", "with", "would", "your",
+];
+
+/// Explicit antonym pairs. Each counts when one text carries one side and the
+/// other text carries the other — a contradiction with no negation word in
+/// sight ("this API is deprecated" vs "this API is recommended").
+///
+/// The pre-`openclaw-vestige-1de` code listed pairs like these but ignored the
+/// second element entirely, firing whenever the *new* text alone contained the
+/// first one.
+const ANTONYM_PAIRS: &[(&str, &str)] = &[
+    ("never", "always"),
+    ("wrong", "right"),
+    ("bad", "good"),
+    ("incorrect", "correct"),
+    ("deprecated", "recommended"),
+    ("outdated", "current"),
+];
+
+/// Markers that flip the polarity of a claim.
+///
+/// One text carrying one of these while the other does not is evidence of a
+/// contradiction only when the two texts are about the same subject — hence
+/// the lexical-overlap requirement in [`PredictionErrorGate::detect_contradiction`].
+/// Without it, "the dream cycle does not run GC" contradicts every note that
+/// happens to sit nearby in embedding space.
+const NEGATION_MARKERS: &[&str] = &[
+    "don't",
+    "do not",
+    "doesn't",
+    "does not",
+    "isn't",
+    "is not",
+    "aren't",
+    "are not",
+    "won't",
+    "will not",
+    "shouldn't",
+    "should not",
+    "cannot",
+    "can't",
+    "never",
+    "avoid",
+    "no longer",
+    "instead of",
+    "rather than",
+    "not ",
+];
+
+/// Phrases that mark the new text as an explicit edit of something.
+///
+/// On their own these say nothing about *what* is being edited — "fixed" is in
+/// every bug-fix note ever written — so they only count toward a supersede when
+/// the two texts also share concrete vocabulary.
+const CORRECTION_MARKERS: &[&str] = &[
+    "actually",
+    "correction",
+    "update:",
+    "fixed",
+    "was wrong",
+    "should be",
+    "better approach",
+    "improved",
+    "the right way",
+];
 
 // ============================================================================
 // GATE DECISION
@@ -263,6 +357,11 @@ pub struct PredictionErrorConfig {
     pub near_identical_threshold: f32,
     /// Threshold for correction detection
     pub correction_threshold: f32,
+    /// Minimum lexical overlap between new and old content before a supersede
+    /// may fire. Guards against superseding a memory that merely *sounds*
+    /// related in embedding space while sharing no actual facts.
+    #[serde(default = "default_min_content_overlap")]
+    pub min_content_overlap: f32,
     /// Maximum candidates to consider
     pub max_candidates: usize,
     /// Whether to auto-supersede demoted memories
@@ -271,12 +370,17 @@ pub struct PredictionErrorConfig {
     pub prefer_updates: bool,
 }
 
+fn default_min_content_overlap() -> f32 {
+    MIN_CONTENT_OVERLAP
+}
+
 impl Default for PredictionErrorConfig {
     fn default() -> Self {
         Self {
             similarity_threshold: DEFAULT_SIMILARITY_THRESHOLD,
             near_identical_threshold: NEAR_IDENTICAL_THRESHOLD,
             correction_threshold: CORRECTION_THRESHOLD,
+            min_content_overlap: MIN_CONTENT_OVERLAP,
             max_candidates: MAX_UPDATE_CANDIDATES,
             auto_supersede_demoted: true,
             prefer_updates: true,
@@ -392,10 +496,20 @@ impl PredictionErrorGate {
             // Check for potential supersede
             let candidate = candidates.iter().find(|c| c.id == best.memory_id);
             if let Some(c) = candidate {
+                // Supersede demotes the old node's FSRS strengths and
+                // Update{Merge} rewrites its content in place — both conflate
+                // two memories into one. Gate all three on the texts actually
+                // sharing concrete vocabulary, not merely sitting close in
+                // embedding space (openclaw-vestige-1de).
+                let overlap = lexical_overlap(new_content, &c.content);
+                let overlap_ok = overlap >= self.config.min_content_overlap;
+
                 // If similar and the existing memory was demoted, supersede it
                 if best.similarity >= self.config.similarity_threshold
-                   && c.was_demoted
-                   && self.config.auto_supersede_demoted {
+                    && overlap_ok
+                    && c.was_demoted
+                    && self.config.auto_supersede_demoted
+                {
                     self.stats.supersedes += 1;
                     return GateDecision::Supersede {
                         old_memory_id: c.id.clone(),
@@ -405,9 +519,12 @@ impl PredictionErrorGate {
                     };
                 }
 
-                // Check for correction (similar but contradictory)
+                // Check for correction: highly similar, overlapping, and either
+                // directly contradictory or explicitly marked as an edit.
                 if best.similarity >= self.config.correction_threshold
-                   && best.appears_contradictory {
+                    && overlap_ok
+                    && (best.appears_contradictory || Self::has_correction_marker(new_content))
+                {
                     self.stats.supersedes += 1;
                     return GateDecision::Supersede {
                         old_memory_id: c.id.clone(),
@@ -419,12 +536,28 @@ impl PredictionErrorGate {
 
                 // Regular update for similar content
                 if best.similarity >= self.config.similarity_threshold && self.config.prefer_updates {
-                    self.stats.updates += 1;
-                    return GateDecision::Update {
-                        target_id: best.memory_id.clone(),
-                        similarity: best.similarity,
-                        update_type: UpdateType::Merge,
+                    if overlap_ok {
+                        self.stats.updates += 1;
+                        return GateDecision::Update {
+                            target_id: best.memory_id.clone(),
+                            similarity: best.similarity,
+                            update_type: UpdateType::Merge,
+                            prediction_error: best.prediction_error,
+                        };
+                    }
+
+                    // Close in embedding space but no shared vocabulary: two
+                    // notes from the same project about different facts. Keep
+                    // them as separate memories instead of concatenating one
+                    // onto the other.
+                    self.stats.creates += 1;
+                    return GateDecision::Create {
+                        reason: CreateReason::DifferentDomain,
                         prediction_error: best.prediction_error,
+                        related_memory_ids: top_candidates
+                            .iter()
+                            .map(|s| s.memory_id.clone())
+                            .collect(),
                     };
                 }
             }
@@ -521,54 +654,50 @@ impl PredictionErrorGate {
         }
     }
 
-    /// Detect if two pieces of content appear contradictory
+    /// Detect if two pieces of content appear contradictory.
     ///
-    /// Uses simple heuristics; could be enhanced with NLI model
+    /// Contradiction is a property of the **pair**, and it needs two things:
+    /// opposing polarity, and a shared subject for that polarity to disagree
+    /// about. Two texts contradict when either
+    ///
+    /// 1. exactly one of them negates, and they talk about the same things, or
+    /// 2. they carry opposite halves of an explicit antonym pair.
+    ///
+    /// Before `openclaw-vestige-1de` this looked only at the new text, so any
+    /// note containing "not ", "fixed" or "improved" read as a contradiction of
+    /// whatever happened to sit nearest in embedding space.
+    ///
+    /// Still a heuristic; an NLI model would do better.
     fn detect_contradiction(&self, new_content: &str, old_content: &str) -> bool {
         let new_lower = new_content.to_lowercase();
         let old_lower = old_content.to_lowercase();
 
-        // Check for explicit negation patterns
-        let negation_pairs = [
-            ("don't", "do"),
-            ("never", "always"),
-            ("avoid", "use"),
-            ("wrong", "right"),
-            ("bad", "good"),
-            ("incorrect", "correct"),
-            ("deprecated", "recommended"),
-            ("outdated", "current"),
-            ("instead of", ""),
-            ("rather than", ""),
-            ("not ", ""),
-        ];
+        let new_negates = NEGATION_MARKERS.iter().any(|m| new_lower.contains(m));
+        let old_negates = NEGATION_MARKERS.iter().any(|m| old_lower.contains(m));
+        let polarity_flip = new_negates != old_negates;
+        let same_subject =
+            lexical_overlap(&new_lower, &old_lower) >= self.config.min_content_overlap;
 
-        for (neg, _pos) in negation_pairs.iter() {
-            if new_lower.contains(neg) && !old_lower.contains(neg) {
-                return true;
-            }
+        if polarity_flip && same_subject {
+            return true;
         }
 
-        // Check for correction phrases
-        let correction_phrases = [
-            "actually",
-            "correction",
-            "update:",
-            "fixed",
-            "was wrong",
-            "should be",
-            "better approach",
-            "improved",
-            "the right way",
-        ];
+        ANTONYM_PAIRS.iter().any(|(neg, pos)| {
+            (contains_word(&new_lower, neg) && contains_word(&old_lower, pos))
+                || (contains_word(&old_lower, neg) && contains_word(&new_lower, pos))
+        })
+    }
 
-        for phrase in correction_phrases.iter() {
-            if new_lower.contains(phrase) {
-                return true;
-            }
-        }
-
-        false
+    /// Does the new content explicitly announce itself as an edit?
+    ///
+    /// This is *intent*, not evidence: "fixed" says the author fixed
+    /// something, never which memory it replaces. Callers must pair it with a
+    /// lexical-overlap check before acting destructively.
+    fn has_correction_marker(new_content: &str) -> bool {
+        let new_lower = new_content.to_lowercase();
+        CORRECTION_MARKERS
+            .iter()
+            .any(|phrase| new_lower.contains(phrase))
     }
 
     /// Get statistics
@@ -650,6 +779,61 @@ impl GateStats {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/// Does `haystack` contain `needle` as a whole word?
+///
+/// Substring matching would let "correct" match inside "incorrect" and "bad"
+/// inside "badge", which inverts the polarity test it feeds.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        // Apostrophes are part of the word ("don't"), so a trailing "'" still
+        // counts as a boundary only when the needle already consumed it.
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        from = start + 1;
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Content words of a text: lowercase alphanumeric tokens of at least
+/// [`MIN_OVERLAP_TOKEN_LEN`] characters that are not common fillers.
+fn content_tokens(text: &str) -> HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= MIN_OVERLAP_TOKEN_LEN)
+        .filter(|t| !OVERLAP_STOPWORDS.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Jaccard overlap of the content words of two texts, in `0.0..=1.0`.
+///
+/// Two notes that genuinely correct each other restate the same nouns; two
+/// notes that merely come from the same project do not. This is the signal
+/// embedding similarity cannot supply on its own.
+pub fn lexical_overlap(a: &str, b: &str) -> f32 {
+    let ta = content_tokens(a);
+    let tb = content_tokens(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    if union == 0.0 { 0.0 } else { intersection / union }
+}
 
 /// Calculate cosine similarity between two vectors
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -757,8 +941,17 @@ mod tests {
         let mut candidate = make_candidate("mem-1", 1.0);
         candidate.embedding = make_embedding(1.05);
         candidate.was_demoted = true;
+        // Since openclaw-vestige-1de the supersede branches also require the
+        // two texts to share vocabulary, so the candidate content has to be
+        // about the same thing as the new content.
+        candidate.content =
+            "Retry the upload with exponential backoff starting at 200ms".to_string();
 
-        let decision = gate.evaluate("Better solution", &embedding, &[candidate]);
+        let decision = gate.evaluate(
+            "Better solution: retry the upload with exponential backoff starting at 500ms",
+            &embedding,
+            &[candidate],
+        );
 
         // Should supersede the demoted memory if similarity is above threshold
         // If not superseding, it should at least update
@@ -783,20 +976,218 @@ mod tests {
     fn test_contradiction_detection() {
         let gate = PredictionErrorGate::new();
 
+        // One side negates, and they are about the same subject.
         assert!(gate.detect_contradiction(
-            "Don't use synchronous code",
-            "Use synchronous code for simplicity"
+            "Don't use synchronous code in the request handler",
+            "Use synchronous code in the request handler for simplicity"
         ));
 
+        // Symmetric — order of the arguments must not matter.
         assert!(gate.detect_contradiction(
-            "Actually, the correct approach is...",
-            "The approach is to..."
+            "Use synchronous code in the request handler for simplicity",
+            "Don't use synchronous code in the request handler"
+        ));
+
+        // Explicit antonyms need no negation word.
+        assert!(gate.detect_contradiction(
+            "The batch endpoint is deprecated",
+            "The batch endpoint is the recommended path"
         ));
 
         assert!(!gate.detect_contradiction(
             "Use async/await for performance",
             "Use async patterns when needed"
         ));
+    }
+
+    /// A negation only contradicts something it is *about*. Same negation, two
+    /// unrelated subjects, must not register.
+    #[test]
+    fn test_negation_needs_a_shared_subject() {
+        let gate = PredictionErrorGate::new();
+
+        assert!(!gate.detect_contradiction(
+            "Don't use synchronous code in the request handler",
+            "Prefer a single writer per shard so back-pressure stays observable"
+        ));
+    }
+
+    /// Regression for openclaw-vestige-1de: a correction *marker* in the new
+    /// text is intent, not evidence. "Actually..." says nothing about which
+    /// memory it corrects, so it is no longer a contradiction on its own.
+    #[test]
+    fn test_correction_marker_alone_is_not_a_contradiction() {
+        let gate = PredictionErrorGate::new();
+
+        assert!(!gate.detect_contradiction(
+            "Actually, the approach is to batch the writes",
+            "The approach is to stream the writes"
+        ));
+        assert!(PredictionErrorGate::has_correction_marker(
+            "Actually, the approach is to batch the writes"
+        ));
+    }
+
+    /// Regression for openclaw-vestige-1de: pre-fix, ANY new text containing
+    /// "not " counted as contradicting whatever was nearest in embedding space.
+    #[test]
+    fn test_negation_in_new_text_alone_is_not_a_contradiction() {
+        let gate = PredictionErrorGate::new();
+
+        assert!(!gate.detect_contradiction(
+            "The dream cycle replays recent memories; it does not run GC",
+            "Consolidation runs FSRS decay, then embedding refresh, then GC"
+        ));
+    }
+
+    #[test]
+    fn test_contains_word_respects_boundaries() {
+        assert!(contains_word("this is incorrect", "incorrect"));
+        // "correct" must not match inside "incorrect"
+        assert!(!contains_word("this is incorrect", "correct"));
+        assert!(!contains_word("the badger ran", "bad"));
+        assert!(contains_word("that is bad", "bad"));
+        assert!(contains_word("don't do that", "don't"));
+    }
+
+    #[test]
+    fn test_lexical_overlap_separates_shared_subject_from_shared_project() {
+        // Same subject, restated: high overlap.
+        let a = "the ring buffer sequence counter wraps and the harness drops frames";
+        let b = "widen the ring buffer sequence counter so the harness stops dropping frames";
+        assert!(
+            lexical_overlap(a, b) >= MIN_CONTENT_OVERLAP,
+            "restated subject should overlap, got {}",
+            lexical_overlap(a, b)
+        );
+
+        // Same project, different facts: low overlap.
+        let c = "Theseus M3a lessons: widen the ring buffer sequence counter to u64";
+        let d = "Theseus M3c lessons: keep the scheduler clock source injectable";
+        assert!(
+            lexical_overlap(c, d) < MIN_CONTENT_OVERLAP,
+            "disjoint facts should not overlap, got {}",
+            lexical_overlap(c, d)
+        );
+
+        assert_eq!(lexical_overlap("", "anything"), 0.0);
+        assert_eq!(lexical_overlap("a b c", "d e f"), 0.0); // all tokens too short
+    }
+
+    /// Build two unit vectors with an exact cosine similarity.
+    fn pair_with_similarity(target: f32) -> (Vec<f32>, Vec<f32>) {
+        let mut a = vec![0.0f32; 384];
+        let mut b = vec![0.0f32; 384];
+        a[0] = 1.0;
+        b[0] = target;
+        b[1] = (1.0 - target * target).sqrt();
+        (a, b)
+    }
+
+    /// The reported defect, verbatim: two lesson notes from one project with
+    /// disjoint facts, sitting at 0.78-0.80 cosine similarity. Pre-fix this
+    /// returned Supersede, which demotes the older node's FSRS strengths.
+    #[test]
+    fn test_disjoint_lessons_do_not_supersede() {
+        let bugfix_lessons = "Theseus M3a/M3b lessons: the harness dropped frames \
+                              when the ring buffer wrapped; fixed by widening the \
+                              sequence counter to u64.";
+        let design_lessons = "Theseus M3c/M3d design lessons: prefer a single \
+                              writer per shard so back-pressure is observable, and \
+                              keep the scheduler clock source injectable.";
+
+        for sim in [0.78_f32, 0.80] {
+            for (new, old) in [
+                (bugfix_lessons, design_lessons),
+                (design_lessons, bugfix_lessons),
+            ] {
+                let (new_emb, old_emb) = pair_with_similarity(sim);
+                let mut gate = PredictionErrorGate::new();
+                let mut candidate = make_candidate("old-node", 1.0);
+                candidate.content = old.to_string();
+                candidate.embedding = old_emb;
+                candidate.retrieval_strength = 1.0; // healthy, never demoted
+
+                let decision = gate.evaluate(new, &new_emb, &[candidate]);
+
+                assert!(
+                    !matches!(decision, GateDecision::Supersede { .. }),
+                    "sim={sim} must not supersede disjoint lessons, got {decision:?}"
+                );
+                match decision {
+                    GateDecision::Create { reason, .. } => assert_eq!(
+                        reason,
+                        CreateReason::DifferentDomain,
+                        "sim={sim} should keep the memories separate"
+                    ),
+                    other => panic!("sim={sim} expected a separate memory, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// The other half of the contract: a real correction of the same fact must
+    /// still supersede, or the fix would have simply disabled the feature.
+    #[test]
+    fn test_genuine_correction_still_supersedes() {
+        let old = "Theseus M3a: the harness drops frames when the ring buffer \
+                   wraps. Root cause: the sequence counter is u32 and wraps at 4 \
+                   billion frames. Always widen the sequence counter to u64.";
+        let new = "Theseus M3a correction: widening the ring buffer sequence \
+                   counter to u64 was wrong — the counter never wraps. The harness \
+                   drops frames because the reader never acknowledges the wrap.";
+
+        let (new_emb, old_emb) = pair_with_similarity(0.88);
+        let mut gate = PredictionErrorGate::new();
+        let mut candidate = make_candidate("old-node", 1.0);
+        candidate.content = old.to_string();
+        candidate.embedding = old_emb;
+
+        let decision = gate.evaluate(new, &new_emb, &[candidate]);
+        assert!(
+            matches!(decision, GateDecision::Supersede { .. }),
+            "genuine correction should supersede, got {decision:?}"
+        );
+    }
+
+    /// Supersede is destructive, so it must be harder to reach than a plain
+    /// update — not easier, which is what a correction threshold below the
+    /// similarity threshold produced.
+    #[test]
+    fn test_correction_threshold_is_above_similarity_threshold() {
+        let config = PredictionErrorConfig::default();
+        assert!(
+            config.correction_threshold > config.similarity_threshold,
+            "correction_threshold {} must exceed similarity_threshold {}",
+            config.correction_threshold,
+            config.similarity_threshold
+        );
+        assert!(config.correction_threshold < config.near_identical_threshold);
+    }
+
+    /// A demoted candidate must also clear the overlap bar, otherwise a node
+    /// that once dipped below 0.3 retrieval strength gets demoted again by
+    /// every unrelated neighbour — a ratchet toward auto-GC.
+    #[test]
+    fn test_demoted_candidate_still_needs_overlap() {
+        let (new_emb, old_emb) = pair_with_similarity(0.80);
+        let mut gate = PredictionErrorGate::new();
+        let mut candidate = make_candidate("old-node", 1.0);
+        candidate.content =
+            "Theseus M3c design lessons: keep the scheduler clock source injectable".to_string();
+        candidate.embedding = old_emb;
+        candidate.was_demoted = true;
+
+        let decision = gate.evaluate(
+            "Theseus M3a lessons: widen the ring buffer sequence counter to u64",
+            &new_emb,
+            &[candidate],
+        );
+
+        assert!(
+            !matches!(decision, GateDecision::Supersede { .. }),
+            "demoted node with disjoint content must not be superseded, got {decision:?}"
+        );
     }
 
     #[test]
